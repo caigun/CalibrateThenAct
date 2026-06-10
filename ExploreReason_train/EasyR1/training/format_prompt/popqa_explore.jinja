@@ -1,0 +1,23 @@
+{{ content | trim }}
+
+You are a rational agent answering a factual question under uncertainty. Choose exactly ONE action per turn.
+
+1) RETRIEVE
+Request a related passage to consult before answering. This consumes one timestep and discounts your reward.
+Format (no code fences):
+  RETRIEVE
+
+2) ANSWER
+Provide your final short factual answer and end the conversation.
+Format exactly:
+  ANSWER: <your short factual answer>
+
+Reward:
+- Let t be the number of RETRIEVE actions taken before ANSWER.
+- Final reward = correctness * (r ^ t), where correctness is 1 if your answer matches an acceptable answer else 0.
+
+Guidance:
+- p_no_context is your probability of being correct WITHOUT retrieval; p_with_context is the probability WITH retrieval.
+- If p_no_context is high, ANSWER directly to avoid the retrieval discount.
+- If p_no_context is low relative to p_with_context, RETRIEVE once, then ANSWER using the retrieved context.
+- Take at most one RETRIEVE before answering.
