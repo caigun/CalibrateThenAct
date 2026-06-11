@@ -1,0 +1,99 @@
+data:
+  train_files: /workspace/data/verl_popqa_withprior_smoke@train
+  val_files: /workspace/data/verl_popqa_withprior_smoke@val
+  prompt_key: prompt
+  answer_key: answer
+  task_id_key: task_id
+  discount_factor_key: discount_factor
+  image_key: images
+  video_key: videos
+  image_dir: null
+  max_prompt_length: 2048
+  max_response_length: 512
+  rollout_batch_size: 4
+  val_batch_size: 8
+  format_prompt: /workspace/CTA-RLCR/CTA/ExploreReason_train/EasyR1/training/format_prompt/popqa_explore.jinja
+  override_chat_template: null
+  shuffle: true
+  seed: 2025
+  min_pixels: null
+  max_pixels: 1254400
+  filter_overlong_prompts: true
+  use_multi_turn: true
+  max_turns: 3
+  single_turn_response_length: 256
+  is_thinking_model: false
+  enable_thinking: false
+algorithm:
+  adv_estimator: grpo
+  disable_kl: false
+  use_kl_loss: true
+  kl_penalty: low_var_kl
+  kl_coef: 1.0e-2
+worker:
+  actor:
+    global_batch_size: 4
+    micro_batch_size_per_device_for_update: 1
+    micro_batch_size_per_device_for_experience: 2
+    max_grad_norm: 1.0
+    padding_free: true
+    dynamic_batching: true
+    ulysses_size: 1
+    model:
+      model_path: Qwen/Qwen2.5-0.5B-Instruct
+      enable_gradient_checkpointing: true
+      trust_remote_code: false
+    optim:
+      lr: 1.0e-6
+      weight_decay: 1.0e-2
+      strategy: adamw_bf16
+      lr_warmup_ratio: 0.0
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: false
+      enable_rank0_init: true
+      torch_dtype: bf16
+    offload:
+      offload_params: true
+      offload_optimizer: true
+  rollout:
+    name: multi_turn_popqa
+    n: 4
+    temperature: 1.0
+    top_p: 1.0
+    gpu_memory_utilization: 0.5
+    enforce_eager: false
+    enable_chunked_prefill: false
+    tensor_parallel_size: 1
+    max_turns: 3
+    single_turn_response_length: 256
+    retrieved_dict_path: /workspace/data/popqa_retrieved_dict.jsonl
+    val_override_config:
+      n: 1
+      temperature: 0.0
+    enable_thinking: false
+  ref:
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: true
+      enable_rank0_init: true
+    offload:
+      offload_params: false
+  reward:
+    reward_type: batch
+    reward_function: /workspace/CTA-RLCR/CTA/ExploreReason_train/EasyR1/training/reward_function/popqa_explore_score.py:compute_score
+    skip_special_tokens: false
+    num_cpus: 1
+trainer:
+  total_epochs: 1
+  max_steps: 2
+  project_name: CTA_RLCR_popqa
+  experiment_name: popqa_smoke
+  logger: ["console"]
+  nnodes: 1
+  n_gpus_per_node: 1
+  val_freq: -1
+  val_before_train: false
+  save_freq: -1
+  save_limit: 1
+  save_checkpoint_path: /workspace/data/out/popqa_rl_smoke

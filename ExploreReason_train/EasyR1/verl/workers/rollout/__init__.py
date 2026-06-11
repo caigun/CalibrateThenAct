@@ -15,10 +15,10 @@
 
 from .config import RolloutConfig
 from .vllm_rollout_spmd import vLLMRollout
-from .multi_turn_rollout import MultiTurnRollout
-from .multi_turn_rollout_tool_use import MultiTurnRolloutToolUse
+# (unimplemented in fork) from .multi_turn_rollout import MultiTurnRollout
+# (unimplemented in fork) from .multi_turn_rollout_tool_use import MultiTurnRolloutToolUse
 from .multi_turn_rollout_popqa import MultiTurnRolloutPopQA
-from .multi_turn_rollout_csv_explorer import MultiTurnRolloutCSVExplorer
+# (unimplemented in fork) from .multi_turn_rollout_csv_explorer import MultiTurnRolloutCSVExplorer
 from .multi_turn_rollout_code_test_explorer import MultiTurnRolloutCodeTestExplorer
 
-__all__ = ["RolloutConfig", "vLLMRollout", "MultiTurnRollout", "MultiTurnRolloutToolUse", "MultiTurnRolloutPopQA", "MultiTurnRolloutCSVExplorer", "MultiTurnRolloutCodeTestExplorer"]
+__all__ = ["RolloutConfig", "vLLMRollout", "MultiTurnRolloutPopQA", "MultiTurnRolloutCodeTestExplorer"]

@@ -22,10 +22,7 @@ from ...utils import torch_functional as VF
 from ...utils.torch_dtypes import PrecisionType
 from .base import BaseRollout
 from .config import RolloutConfig
-try:
-    from src.execute_code import CodeExecutor
-except Exception:
-    CodeExecutor = None
+# CodeExecutor not needed for PopQA
 
 def _repeat_interleave(value: Union[torch.Tensor, np.ndarray], repeats: int) -> Union[torch.Tensor, np.ndarray]:
     # repeat the elements, supports both tensor and numpy array
@@ -262,7 +259,7 @@ def log_rollout_conversations(samples_info: List[Dict[str, Any]], log_dir: str =
     print(f"📝 Code Test Explorer rollout conversations logged to: {log_path} (logged {len(samples_to_log)} samples out of {total_samples})")
 
 
-class MultiTurnRolloutCodeTestExplorer(BaseRollout):
+class MultiTurnRolloutPopQA(BaseRollout):
     """
     Multi-turn rollout for code test explorer: call unit tests, execute code, and provide answers.
     At each turn, the LLM can:
@@ -276,9 +273,7 @@ class MultiTurnRolloutCodeTestExplorer(BaseRollout):
         model_path: str,
         config: RolloutConfig,
         tokenizer: PreTrainedTokenizer,
-        all_task_base_path: Optional[str] = None,
-        enable_thinking: bool = False,
-        log_dir: Optional[str] = None,
+        retrieved_dict_path: Optional[str] = None,
     ):
         super().__init__()
         self.rank = int(os.getenv("RANK", "0"))
@@ -291,10 +286,10 @@ class MultiTurnRolloutCodeTestExplorer(BaseRollout):
 
         self.single_turn_response_length = getattr(config, 'single_turn_response_length', 1024)
 
-        self.base_dir = all_task_base_path if all_task_base_path is not None else "./"
-        self.code_executor = CodeExecutor()
-        self.enable_thinking = enable_thinking
-        self.log_dir = log_dir
+        self.retrieved_dict_path = retrieved_dict_path
+        self.code_executor = None  # no code executor for PopQA
+        self.enable_thinking = getattr(config, "enable_thinking", False)
+        self.log_dir = getattr(config, "log_dir", None)
 
         # vLLM inference engine
         self.inference_engine = LLM(
@@ -560,7 +555,17 @@ class MultiTurnRolloutCodeTestExplorer(BaseRollout):
 
                 action_type, content = action_sequences[i]
 
-                if action_type == 'UNIT_TESTS':
+                if action_type == 'RETRIEVE':
+                    samples_info[index]['stop'] = False
+                    samples_info[index]['unit_test_trace'].append('RETRIEVE')
+                    _ctx = samples_info[index]['csv_info'].get('retrieved_context', 'No relevant context found.')
+                    _fb = "Retrieved context:\n" + str(_ctx)
+                    samples_info[index]['sequence'] = samples_info[index]['sequence'].strip() + '\n'
+                    if self.enable_thinking:
+                        samples_info[index]['sequence'] += (f"<|im_start|>user\n{_fb.strip()}\n<|im_end|>\n" f"<|im_start|>assistant\n")
+                    else:
+                        samples_info[index]['sequence'] += (f"<|im_start|>user\n{_fb.strip()}\n<|im_end|>\n" f"<|im_start|>assistant\n<think>\n\n</think>\n\n")
+                elif action_type == 'UNIT_TESTS':
                     samples_info[index]['stop'] = False
                     samples_info[index]['unit_test_trace'].extend(content)
 
@@ -743,46 +748,12 @@ class MultiTurnRolloutCodeTestExplorer(BaseRollout):
             print(f"⚠️ Available keys: {list(non_tensor_batch.keys())}")
 
         for idx in range(batch_size):
-            # Extract CSV format info from sampled_format if available
-            sampled_format = None
-            if "sampled_format" in non_tensor_batch:
-                sampled_format = non_tensor_batch["sampled_format"][idx]
-                print(f"🔍 DEBUG sample {idx}: sampled_format = {sampled_format}")
-                print(f"🔍 DEBUG sample {idx}: type(sampled_format) = {type(sampled_format)}")
-
-                # Assert sampled_format is not None
-                if sampled_format is None:
-                    raise ValueError(f"❌ sampled_format is None for sample {idx}!")
-
-                # Check if it's a dict and has expected keys
-                if isinstance(sampled_format, dict):
-                    print(f"🔍 DEBUG sample {idx}: sampled_format keys = {sampled_format.keys()}")
-                    print(f"🔍 DEBUG sample {idx}: Delimiter = {sampled_format.get('Delimiter')}")
-                    print(f"🔍 DEBUG sample {idx}: Quotechar = {sampled_format.get('Quotechar')}")
-                    print(f"🔍 DEBUG sample {idx}: Skiprows = {sampled_format.get('Skiprows')}")
-            else:
-                raise ValueError(f"❌ 'sampled_format' key missing from non_tensor_batch!")
-
             csv_info = {
                 "answer": answer_list[idx] if answer_list is not None else None,
-                "task_id": task_id_list[idx] if task_id_list is not None else '0',
-                "task_instruction": non_tensor_batch.get("task_instruction", [None] * batch_size)[idx] if "task_instruction" in non_tensor_batch else ["", ""],
-                "meta_info": {
-                    "delimiter": sampled_format.get("Delimiter") if sampled_format else None,
-                    "quotechar": sampled_format.get("Quotechar") if sampled_format else None,
-                    "skiprows": sampled_format.get("Skiprows") if sampled_format else None,
-                }
+                "possible_answers": (list(non_tensor_batch["possible_answers"][idx]) if "possible_answers" in non_tensor_batch else ([answer_list[idx]] if answer_list is not None else [])),
+                "retrieved_context": (str(non_tensor_batch["retrieved_context"][idx]) if "retrieved_context" in non_tensor_batch else "No relevant context found."),
+                "task_id": task_id_list[idx] if task_id_list is not None else "0",
             }
-
-            # Assert that meta_info values are not None
-            if csv_info["meta_info"]["delimiter"] is None:
-                raise ValueError(f"❌ delimiter is None for sample {idx}! sampled_format was: {sampled_format}")
-            if csv_info["meta_info"]["quotechar"] is None:
-                raise ValueError(f"❌ quotechar is None for sample {idx}! sampled_format was: {sampled_format}")
-            if csv_info["meta_info"]["skiprows"] is None:
-                raise ValueError(f"❌ skiprows is None for sample {idx}! sampled_format was: {sampled_format}")
-
-            print(f"✅ DEBUG sample {idx}: csv_info meta_info = {csv_info['meta_info']}")
             csv_info_list.append(csv_info)
 
         vllm_inputs = []
@@ -941,3 +912,30 @@ class MultiTurnRolloutCodeTestExplorer(BaseRollout):
             non_tensor_batch.pop("multi_modal_data", None)
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+
+# ===== PopQA overrides (RL#2 / QA CTA-RL) =====
+import re as _re_popqa
+def parse_turn_action(text):
+    if "<think>" in text and "</think>" not in text:
+        return "TRUNCATED", None
+    if "</think>" in text:
+        text = text.split("</think>")[-1].strip()
+    text = text.replace("<|im_end|>", "").strip()
+    m = _re_popqa.search(r"ANSWER:\s*(.+)$", text, flags=_re_popqa.DOTALL | _re_popqa.IGNORECASE)
+    if m:
+        return "ANSWER", m.group(1).strip()
+    if _re_popqa.match(r"^\s*RETRIEVE\b", text, flags=_re_popqa.IGNORECASE):
+        return "RETRIEVE", None
+    return None, None
+def calculate_correctness(pred, csv_info):
+    answers = csv_info.get("possible_answers", []) if isinstance(csv_info, dict) else []
+    if pred is None:
+        return 0.0
+    if isinstance(answers, str):
+        answers = [answers]
+    p = str(pred).strip(); pl = p.lower()
+    for a in answers:
+        a = str(a)
+        if a in p or a.lower() in pl or a.capitalize() in p:
+            return 1.0
+    return 0.0
