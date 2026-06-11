@@ -40,7 +40,7 @@ worker:
     dynamic_batching: true
     ulysses_size: 1
     model:
-      model_path: Qwen/Qwen2.5-0.5B-Instruct
+      model_path: Qwen/Qwen3-4B
       enable_gradient_checkpointing: true
       trust_remote_code: false
     optim:
