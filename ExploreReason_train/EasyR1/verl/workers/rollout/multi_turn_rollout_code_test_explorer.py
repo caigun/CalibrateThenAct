@@ -22,10 +22,7 @@ from ...utils import torch_functional as VF
 from ...utils.torch_dtypes import PrecisionType
 from .base import BaseRollout
 from .config import RolloutConfig
-try:
-    from src.execute_code import CodeExecutor
-except Exception:
-    CodeExecutor = None
+from src.execute_code import CodeExecutor
 
 def _repeat_interleave(value: Union[torch.Tensor, np.ndarray], repeats: int) -> Union[torch.Tensor, np.ndarray]:
     # repeat the elements, supports both tensor and numpy array

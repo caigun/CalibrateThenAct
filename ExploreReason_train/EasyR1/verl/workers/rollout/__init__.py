@@ -19,6 +19,6 @@ from .vllm_rollout_spmd import vLLMRollout
 # (unimplemented in fork) from .multi_turn_rollout_tool_use import MultiTurnRolloutToolUse
 from .multi_turn_rollout_popqa import MultiTurnRolloutPopQA
 # (unimplemented in fork) from .multi_turn_rollout_csv_explorer import MultiTurnRolloutCSVExplorer
-from .multi_turn_rollout_code_test_explorer import MultiTurnRolloutCodeTestExplorer
+# (code-task rollout: unused for PopQA RL; imports env_explorer 'src', unavailable in EasyR1 training) from .multi_turn_rollout_code_test_explorer import MultiTurnRolloutCodeTestExplorer
 
-__all__ = ["RolloutConfig", "vLLMRollout", "MultiTurnRolloutPopQA", "MultiTurnRolloutCodeTestExplorer"]
+__all__ = ["RolloutConfig", "vLLMRollout", "MultiTurnRolloutPopQA"]
