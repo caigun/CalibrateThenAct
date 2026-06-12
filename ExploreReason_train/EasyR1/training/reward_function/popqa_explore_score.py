@@ -39,10 +39,16 @@ def compute_format_reward(response):
     return 1.0 if a in ("RETRIEVE", "ANSWER") else 0.0
 
 def count_retrieves(action_seqs):
+    import numpy as _np
     n = 0
     for a in action_seqs:
-        at = a[0] if isinstance(a, (list, tuple)) else a
-        if at == "RETRIEVE":
+        at = a
+        while isinstance(at, (list, tuple, _np.ndarray)):
+            if len(at) == 0:
+                at = None
+                break
+            at = at[0]
+        if str(at).strip() == "RETRIEVE":
             n += 1
     return n
 
@@ -60,8 +66,8 @@ def compute_score(reward_inputs, format_weight=0.1, log_dir=None, max_turns=4, *
         correctness = popqa_correct(pred, answers)
         num_retrieves = count_retrieves(action_seqs)
         discounted = round(correctness * (r ** num_retrieves), 6)
-        if response_list:
-            format_reward = 1.0 if all(compute_format_reward(x) == 1.0 for x in response_list) else 0.0
+        if len(response_list) > 0:
+            format_reward = 1.0 if all(compute_format_reward(str(x)) == 1.0 for x in response_list) else 0.0
         else:
             format_reward = 1.0
         trace_too_long = len(action_seqs) > max_turns
