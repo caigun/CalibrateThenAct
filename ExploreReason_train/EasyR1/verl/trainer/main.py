@@ -1,3 +1,4 @@
+import os
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -117,6 +118,7 @@ def main():
                 "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
                 "PYTHONUNBUFFERED": "1",
                 "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                "CTA_EVAL_DUMP": os.environ.get("CTA_EVAL_DUMP", ""),
             }
         }
         ray.init(runtime_env=runtime_env)

@@ -412,6 +412,11 @@ class RayPPOTrainer:
 
             # repeat to align with repeated responses in rollout
             test_batch = test_batch.repeat(repeat_times=repeat_times, interleave=True)
+            # Mirror the train path: drop placeholder responses/response_mask before unioning with generated ones (multi-turn val)
+            if "responses" in test_batch.batch:
+                test_batch.batch.pop("responses")
+            if "response_mask" in test_batch.batch:
+                test_batch.batch.pop("response_mask")
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
@@ -425,7 +430,12 @@ class RayPPOTrainer:
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_inputs.extend(input_texts)
             sample_outputs.extend(output_texts)
-            sample_labels.extend(test_batch.non_tensor_batch["ground_truth"].tolist())
+            if "ground_truth" in test_batch.non_tensor_batch:
+                sample_labels.extend(test_batch.non_tensor_batch["ground_truth"].tolist())
+            elif "answer" in test_batch.non_tensor_batch:
+                sample_labels.extend(test_batch.non_tensor_batch["answer"].tolist())
+            else:
+                sample_labels.extend([""] * len(scores))
             sample_scores.extend(scores)
 
             reward_tensor_lst.append(reward_tensor)

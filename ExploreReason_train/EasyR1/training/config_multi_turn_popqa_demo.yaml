@@ -89,7 +89,7 @@ trainer:
   max_steps: 20
   project_name: CTA_RLCR_popqa
   experiment_name: popqa_demo_withprior
-  logger: ["console"]
+  logger: ["console", "wandb"]
   nnodes: 1
   n_gpus_per_node: 2
   val_freq: -1

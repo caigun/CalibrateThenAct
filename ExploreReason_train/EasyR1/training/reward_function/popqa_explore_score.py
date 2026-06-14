@@ -1,7 +1,7 @@
 """QA CTA-RL reward (RL#2). Mirror of explore_code_test_score.py:compute_score for PopQA.
 Reward = correctness(popqa alias-match) * r^(num_retrieves), gated by per-turn RETRIEVE/ANSWER format.
 """
-import re, string
+import re, string, os, json as _json
 
 def normalize_answer(s):
     s = str(s).lower()
@@ -52,12 +52,13 @@ def count_retrieves(action_seqs):
             n += 1
     return n
 
-def compute_score(reward_inputs, format_weight=0.1, log_dir=None, max_turns=4, **kw):
+def compute_score(reward_inputs, format_weight=0.1, log_dir=None, max_turns=4, dump_path=None, **kw):
     results = []
     for ri in reward_inputs:
         pred = ri.get("pred_answers", "")
         answers = ri.get("possible_answers", ri.get("gold_answers", []))
         action_seqs = ri.get("action_seqs", [])
+        task_id = ri.get("task_id", ri.get("index", ""))
         r = float(ri.get("discount_factor", 1.0))
         response_list = ri.get("response_list", [])
         p_no_context = ri.get("p_no_context", None)
@@ -83,7 +84,21 @@ def compute_score(reward_inputs, format_weight=0.1, log_dir=None, max_turns=4, *
             "num_retrieves": num_retrieves,
             "format_reward": format_reward,
             "oracle_match": oracle_match,
+            "oracle_match_rate": oracle_match,
+            "accuracy": correctness,
+            "retrieve_rate": 1.0 if num_retrieves>0 else 0.0,
+            "task_id": str(task_id),
         })
+    _dump = dump_path or os.environ.get("CTA_EVAL_DUMP")
+    if _dump:
+        with open(_dump, "a") as _f:
+            for _ri, _res in zip(reward_inputs, results):
+                _rec = dict(_res)
+                _rec["_pred"] = str(_ri.get("pred_answers", ""))[:100]
+                _rec["_gold"] = str(_ri.get("possible_answers", _ri.get("gold_answers", "")))[:120]
+                _rec["_pnc"] = _ri.get("p_no_context"); _rec["_pret"] = _ri.get("p_ret"); _rec["_df"] = _ri.get("discount_factor")
+                _rec["_keys"] = sorted(_ri.keys())
+                _f.write(_json.dumps(_rec) + "\n")
     return results
 
 if __name__ == "__main__":

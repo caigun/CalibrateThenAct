@@ -1,6 +1,6 @@
 data:
-  train_files: /workspace/data/verl_popqa_noprior_demo@train
-  val_files: /workspace/data/verl_popqa_noprior_demo@val
+  train_files: /scratch/cw5039/cta-rlcr/data/rl_popqa_isotonic@train
+  val_files: /scratch/cw5039/cta-rlcr/data/rl_popqa_isotonic@val
   prompt_key: prompt
   answer_key: answer
   task_id_key: task_id
@@ -9,10 +9,10 @@ data:
   video_key: videos
   image_dir: null
   max_prompt_length: 2048
-  max_response_length: 512
+  max_response_length: 2048
   rollout_batch_size: 4
   val_batch_size: 8
-  format_prompt: /workspace/CTA-RLCR/CTA/ExploreReason_train/EasyR1/training/format_prompt/popqa_explore.jinja
+  format_prompt: /scratch/cw5039/cta-rlcr/CTA-RLCR/CTA/ExploreReason_train/EasyR1/training/format_prompt/popqa_explore.jinja
   override_chat_template: null
   shuffle: true
   seed: 2025
@@ -21,7 +21,7 @@ data:
   filter_overlong_prompts: true
   use_multi_turn: true
   max_turns: 3
-  single_turn_response_length: 1024
+  single_turn_response_length: 2048
   is_thinking_model: true
   enable_thinking: true
 algorithm:
@@ -61,13 +61,13 @@ worker:
     n: 4
     temperature: 1.0
     top_p: 1.0
-    gpu_memory_utilization: 0.5
+    gpu_memory_utilization: 0.6
     enforce_eager: false
     enable_chunked_prefill: false
     tensor_parallel_size: 1
     max_turns: 3
-    single_turn_response_length: 1024
-    retrieved_dict_path: /workspace/data/popqa_retrieved_dict.jsonl
+    single_turn_response_length: 2048
+    retrieved_dict_path: null
     val_override_config:
       n: 1
       temperature: 0.0
@@ -81,14 +81,14 @@ worker:
       offload_params: false
   reward:
     reward_type: batch
-    reward_function: /workspace/CTA-RLCR/CTA/ExploreReason_train/EasyR1/training/reward_function/popqa_explore_score.py:compute_score
+    reward_function: /scratch/cw5039/cta-rlcr/CTA-RLCR/CTA/ExploreReason_train/EasyR1/training/reward_function/popqa_explore_score.py:compute_score
     skip_special_tokens: false
     num_cpus: 1
 trainer:
   total_epochs: 1
   max_steps: 20
   project_name: CTA_RLCR_popqa
-  experiment_name: popqa_noprior_smoke
+  experiment_name: popqa_demo_withprior
   logger: ["console", "wandb"]
   nnodes: 1
   n_gpus_per_node: 2
@@ -96,4 +96,4 @@ trainer:
   val_before_train: false
   save_freq: -1
   save_limit: 1
-  save_checkpoint_path: /workspace/data/out/popqa_rl_noprior_smoke
+  save_checkpoint_path: /scratch/cw5039/cta-rlcr/out/cta_rl
