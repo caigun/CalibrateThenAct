@@ -398,7 +398,7 @@ class RayPPOTrainer:
             test_batch = DataProto.from_single_dict(batch_dict)
             test_gen_batch = test_batch.pop(
                 batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data", "environment", "answer", "oracle_trace", "task_id", "discount_factor", "d_unit", "d_code", "sampled_format"],
+                non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data", "environment", "answer", "oracle_trace", "task_id", "discount_factor", "d_unit", "d_code", "sampled_format", "retrieved_context", "possible_answers"],
             )
             repeat_times = self.config.worker.rollout.val_override_config.get("n", 1)
             test_gen_batch.meta_info = self.config.worker.rollout.val_override_config
@@ -498,7 +498,7 @@ class RayPPOTrainer:
             # pop those keys for generation
             gen_batch = new_batch.pop(
                 batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data", "answer", "environment", "oracle_trace", "task_id", "discount_factor", "d_unit", "d_code", "sampled_format"],
+                non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data", "answer", "environment", "oracle_trace", "task_id", "discount_factor", "d_unit", "d_code", "sampled_format", "retrieved_context", "possible_answers"],
                 meta_info_keys=["min_pixels", "max_pixels", "video_fps"],
             )
             # print("ray_trainer: gen_batch keys:")

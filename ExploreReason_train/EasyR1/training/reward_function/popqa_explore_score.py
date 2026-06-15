@@ -94,7 +94,10 @@ def compute_score(reward_inputs, format_weight=0.1, log_dir=None, max_turns=4, d
             for _ri, _res in zip(reward_inputs, results):
                 _rec = dict(_res)
                 _rec["task_id"] = str(_ri.get("task_id", _ri.get("index", "")))
-                _rec["_pred"] = str(_ri.get("pred_answers", ""))[:100]
+                _rec["_pred"] = str(_ri.get("pred_answers", ""))
+                _rl = _ri.get("response_list")
+                _rec["_responses"] = [str(x) for x in ([] if _rl is None else list(_rl))]
+                _rec["_retrieved"] = str(_ri.get("retrieved_context", _ri.get("sequence","")))
                 _rec["_gold"] = str(_ri.get("possible_answers", _ri.get("gold_answers", "")))[:120]
                 _rec["_pnc"] = _ri.get("p_no_context"); _rec["_pret"] = _ri.get("p_ret"); _rec["_df"] = _ri.get("discount_factor")
                 _rec["_keys"] = sorted(_ri.keys())
