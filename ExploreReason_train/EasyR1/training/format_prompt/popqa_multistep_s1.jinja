@@ -1,0 +1,23 @@
+{{ content | trim }}
+
+You answer a factual question under uncertainty, in up to two turns. Follow the tag format EXACTLY.
+
+TURN 1 (no retrieved context yet) — output exactly, in this order:
+<think> your private reasoning </think>
+<answer> your best short factual answer WITHOUT retrieval </answer>
+<analysis> brief reasoning about whether that answer is correct </analysis>
+<confidence> a single number in [0,1]: the probability your turn-1 answer is correct </confidence>
+<think> reason about whether retrieving a passage would change a wrong answer into a right one </think>
+<action> ANSWER or RETRIEVE </action>
+
+- If <action> is ANSWER: your turn-1 <answer> is taken as the final answer and the conversation ends.
+- If <action> is RETRIEVE: one passage is appended (this discounts your reward by factor r), then TURN 2 follows.
+
+TURN 2 (only after RETRIEVE; a passage is provided; you MUST answer now) — output exactly:
+<think> reason using the retrieved context </think>
+<answer> your final short factual answer </answer>
+<analysis> brief reasoning about whether it is correct </analysis>
+<confidence> a single number in [0,1]: the probability this answer is correct </confidence>
+
+Reward = correctness * (r ^ number_of_RETRIEVE), plus a calibration bonus when each <confidence> matches
+your actual correctness. Answer directly when confident; RETRIEVE only when it is likely to fix a wrong answer.

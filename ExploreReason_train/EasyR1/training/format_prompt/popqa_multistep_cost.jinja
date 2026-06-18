@@ -1,0 +1,28 @@
+{{ content | trim }}
+
+You answer a factual question under uncertainty, in up to two turns. The question states a retrieval
+cost r (each RETRIEVE multiplies your reward by r). Follow the tag format EXACTLY.
+
+TURN 1 (no retrieved context yet) — output exactly, in this order:
+<think> your private reasoning </think>
+<answer> your best short factual answer WITHOUT retrieval </answer>
+<analysis> brief reasoning about whether that answer is correct </analysis>
+<confidence> a single number in [0,1]: the probability your turn-1 answer is correct </confidence>
+<think> weigh it: estimate your confidence AFTER retrieving, then compare the expected gain against the
+        cost r stated above. Retrieving is worth it only if the gain in correctness exceeds (1 - r). </think>
+<action> ANSWER or RETRIEVE </action>
+<estimated_confidence> a single number in [0,1]: your predicted confidence AFTER retrieving </estimated_confidence>
+
+- If <action> is ANSWER: your turn-1 <answer> is final and the conversation ends.
+- If <action> is RETRIEVE: one passage is appended (reward x r), then TURN 2 follows.
+- Decide cost-sensitively: when r is LOW (expensive), retrieve only if your confidence is low AND
+  retrieval would likely fix it; when r is HIGH (cheap), retrieve more readily.
+
+TURN 2 (only after RETRIEVE; a passage is provided; you MUST answer now) — output exactly:
+<think> reason using the retrieved context </think>
+<answer> your final short factual answer </answer>
+<analysis> brief reasoning about whether it is correct </analysis>
+<confidence> a single number in [0,1]: the probability this answer is correct </confidence>
+
+Reward = correctness * (r ^ number_of_RETRIEVE) + calibration bonuses for matched <confidence> and a
+bonus when <estimated_confidence> matches your turn-2 <confidence>. Be cost-sensitive with r.

@@ -1,0 +1,23 @@
+{{ content | trim }}
+
+You are a rational agent tasked with answering factual questions under uncertainty. At each step, you can either directly answer the question or retrieve additional context before answering. 
+
+Available actions:
+- RETRIEVE: request a related context to consult before deciding your final answer. This consumes one timestep.
+- ANSWER: <your short factual answer> — provide your final answer and end the interaction.
+
+Each question comes with your estimated probabilities of answering correctly:
+- p_no_context: probability you can answer correctly without retrieving.
+- p_with_context: probability you can answer correctly after retrieval.
+
+Your goal is to maximize expected discounted reward:
+Reward = r^t * correctness, where t is the timestep when you issue ANSWER and correctness ∈ {0,1}.
+
+Retrieval information:
+If you choose RETRIEVE, your expected answer accuracy after retrieval is 0.57.
+If you choose not to retrieve, you must rely only on your current knowledge.
+
+Be deliberate — retrieving may improve accuracy but reduces reward due to time discounting. Balance speed and correctness carefully.
+
+Always respond with exactly one action token per step, using the format: 
+RETRIEVE or ANSWER: <short factual answer>.

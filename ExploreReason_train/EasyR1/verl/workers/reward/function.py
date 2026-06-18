@@ -194,6 +194,13 @@ class BatchFunctionRewardManager(FunctionRewardManager):
                 raise ValueError("action_seqs is required in non_tensor_batch for BatchFunctionRewardManager.")
             if "discount_factors" in data.non_tensor_batch:
                 reward_input["discount_factors"] = data.non_tensor_batch["discount_factors"][i]
+            # FIX: forward singular discount_factor (compute_score reads this; plural never existed
+            # -> r defaulted to 1.0, no r^num_retrieves discount) and possible_answers (else PopQA
+            # reward scored against only the first gold alias).
+            if "discount_factor" in data.non_tensor_batch:
+                reward_input["discount_factor"] = data.non_tensor_batch["discount_factor"][i]
+            if "possible_answers" in data.non_tensor_batch:
+                reward_input["possible_answers"] = data.non_tensor_batch["possible_answers"][i]
             if "helper_call_traces" in data.non_tensor_batch:
                 reward_input["helper_call_traces"] = data.non_tensor_batch["helper_call_traces"][i]
             if "oracle_traces" in data.non_tensor_batch:

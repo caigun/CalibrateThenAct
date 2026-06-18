@@ -916,15 +916,30 @@ class MultiTurnRolloutPopQA(BaseRollout):
 # ===== PopQA overrides (RL#2 / QA CTA-RL) =====
 import re as _re_popqa
 def parse_turn_action(text):
+    # Multi-step TABC (RL#1+RL#2 merged): turn 1 ends with <action>ANSWER|RETRIEVE</action>
+    # and carries the candidate answer in <answer>...</answer> (two <think> blocks present);
+    # turn 2 (post-retrieval, forced) has <answer> + <confidence> but no <action>.
+    # Backward compatible with the legacy "ANSWER: ..."/"RETRIEVE" plain-text protocol.
     if "<think>" in text and "</think>" not in text:
         return "TRUNCATED", None
-    if "</think>" in text:
-        text = text.split("</think>")[-1].strip()
-    text = text.replace("<|im_end|>", "").strip()
-    m = _re_popqa.search(r"ANSWER:\s*(.+)$", text, flags=_re_popqa.DOTALL | _re_popqa.IGNORECASE)
+    # strip ALL complete think spans (turn 1 has two), keep the tags between them
+    body = _re_popqa.sub(r"(?is)<think>.*?</think>", " ", text).replace("<|im_end|>", "")
+    ans_m = _re_popqa.search(r"(?is)<answer>(.*?)</answer>", body)
+    ans = ans_m.group(1).strip() if ans_m else None
+    act_m = _re_popqa.search(r"(?is)<action>\s*(RETRIEVE|ANSWER)\s*</action>", body)
+    if act_m:
+        if act_m.group(1).upper() == "RETRIEVE":
+            return "RETRIEVE", None
+        return "ANSWER", (ans if ans is not None else "")
+    # turn-2 forced answer: <answer> present, no <action>
+    if ans is not None:
+        return "ANSWER", ans
+    # legacy fallbacks
+    stripped = body.strip()
+    m = _re_popqa.search(r"ANSWER:\s*(.+)$", stripped, flags=_re_popqa.DOTALL | _re_popqa.IGNORECASE)
     if m:
         return "ANSWER", m.group(1).strip()
-    if _re_popqa.match(r"^\s*RETRIEVE\b", text, flags=_re_popqa.IGNORECASE):
+    if _re_popqa.match(r"^\s*RETRIEVE\b", stripped, flags=_re_popqa.IGNORECASE):
         return "RETRIEVE", None
     return None, None
 def calculate_correctness(pred, csv_info):
