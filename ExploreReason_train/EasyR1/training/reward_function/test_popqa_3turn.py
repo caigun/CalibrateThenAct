@@ -282,6 +282,153 @@ def test_rollout_mode_unchanged():
     print("PASS test_rollout_mode_unchanged (no cross-sample leakage; group differs from rollout)")
 
 
+# ---------------------------------------------------------------- verbal oracle: r-sensitivity
+def test_verbal_oracle_r_sensitivity():
+    """Verbal oracle = ANSWER iff c1 >= ec*r. With c1=0.5, ec=0.8:
+       ANSWER iff 0.5 >= 0.8*r iff r <= 0.625.
+       r=0.5 -> 0.5 >= 0.40 -> ANSWER ; r=0.7 -> 0.5 >= 0.56 (False) -> RETRIEVE."""
+    # action ANSWER emitted; matches oracle at r=0.5, mismatches at r=0.7
+    rl = [_T1(ans="Paris", conf="0.5"), _T2(action="ANSWER", ec="0.8"), _T3(ans="Paris")]
+    ri_lo = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["ANSWER", None], ["ANSWER", "Paris"]])
+    d_lo = S.compute_score([ri_lo], oracle_mode="verbal", dump_path=None)[0]
+    assert d_lo["oracle_match"] == 1.0, ("r=0.5 should -> ANSWER oracle", d_lo)
+
+    ri_hi = _ri(rl, ["Paris"], 0.7, [["CONTINUE", None], ["ANSWER", None], ["ANSWER", "Paris"]])
+    d_hi = S.compute_score([ri_hi], oracle_mode="verbal", dump_path=None)[0]
+    assert d_hi["oracle_match"] == 0.0, ("r=0.7 should -> RETRIEVE oracle, emitted ANSWER", d_hi)
+
+    # Symmetric: emit RETRIEVE -> mismatch at r=0.5, match at r=0.7
+    rl_ret = [_T1(ans="Paris", conf="0.5"), _T2(action="RETRIEVE", ec="0.8"), _T3(ans="Paris")]
+    ri_lo_r = _ri(rl_ret, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+    assert S.compute_score([ri_lo_r], oracle_mode="verbal")[0]["oracle_match"] == 0.0
+    ri_hi_r = _ri(rl_ret, ["Paris"], 0.7, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+    assert S.compute_score([ri_hi_r], oracle_mode="verbal")[0]["oracle_match"] == 1.0
+    print("PASS test_verbal_oracle_r_sensitivity (ANSWER@r=0.5 -> RETRIEVE@r=0.7 for c1=0.5,ec=0.8)")
+
+
+def test_verbal_oracle_missing_conf():
+    """If c1 or ec is None (format fail), verbal oracle is None -> oracle_match=0."""
+    # missing ec in T2 -> ec None -> oracle None -> match 0 (also format gate zeroes overall)
+    bad_t2 = "<think>x</think><analysis>c</analysis><action>ANSWER</action>"
+    rl = [_T1(ans="Paris", conf="0.5"), bad_t2, _T3(ans="Paris")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["ANSWER", None], ["ANSWER", "Paris"]])
+    d = S.compute_score([ri], oracle_mode="verbal")[0]
+    assert d["oracle_match"] == 0.0, d
+    assert d["overall"] == 0.0  # format gate
+    print("PASS test_verbal_oracle_missing_conf")
+
+
+def test_verbal_oracle_diag_dump():
+    """Dump carries oracle_verbal, c1, ec, r diagnostics for the verbal mode."""
+    import tempfile, json, os as _os
+    rl = [_T1(ans="Paris", conf="0.5"), _T2(action="ANSWER", ec="0.8"), _T3(ans="Paris")]
+    ri = _ri(rl, ["Paris"], 0.7, [["CONTINUE", None], ["ANSWER", None], ["ANSWER", "Paris"]])
+    fd, path = tempfile.mkstemp(suffix=".jsonl"); _os.close(fd)
+    try:
+        S.compute_score([ri], oracle_mode="verbal", dump_path=path)
+        rec = [json.loads(l) for l in open(path) if l.strip()][0]
+        assert rec["oracle_verbal"] == "RETRIEVE", rec["oracle_verbal"]  # 0.5 < 0.8*0.7=0.56
+        assert _approx(rec["c1"], 0.5) and _approx(rec["ec"], 0.8)
+        assert _approx(rec["r"], 0.7)
+        assert rec["oracle_mode"] == "verbal"
+        assert rec["oracle_mc"] is None  # not computed in verbal mode
+    finally:
+        _os.remove(path)
+    print("PASS test_verbal_oracle_diag_dump")
+
+
+# ---------------------------------------------------------------- combined oracle: 0.5/0.5 blend
+def test_combined_oracle_blend():
+    """combined: oracle_match = 0.5*1[action==oracle_mc] + 0.5*1[action==oracle_verbal].
+    Construct a group where MC and verbal oracles DISAGREE and verify the blend per rollout.
+
+    Group of 4 (task_id qc), r=0.5:
+      cA1 = [1,1,0,0] -> p_A1=0.5 ; cA2 = [1,1,1,1] -> p_A2=1.0
+      oracle_mc = ANSWER iff 0.5 >= 1.0*0.5 = 0.5 -> ANSWER (tie -> ANSWER).
+    Give each rollout c1=0.3, ec=0.9 -> verbal: ANSWER iff 0.3 >= 0.9*0.5=0.45 (False) -> RETRIEVE.
+    So oracle_mc=ANSWER, oracle_verbal=RETRIEVE (DISAGREE).
+      emit ANSWER  -> 0.5*1 + 0.5*0 = 0.5
+      emit RETRIEVE-> 0.5*0 + 0.5*1 = 0.5
+    """
+    gold = "Paris"; r = 0.5
+    cA1_list = [1, 1, 0, 0]; cA2_list = [1, 1, 1, 1]
+
+    def _grp(action):
+        g = []
+        for cA1, cA2 in zip(cA1_list, cA2_list):
+            a1 = gold if cA1 else "Berlin"
+            a2 = gold if cA2 else "Berlin"
+            rl = [_T1(ans=a1, conf="0.3"), _T2(action=action, ec="0.9"), _T3(ans=a2)]
+            aseq = [["CONTINUE", None], [action, None], ["ANSWER", a2]]
+            g.append(_ri_tid(rl, [gold], r, aseq, "qc"))
+        return g
+
+    res_ans = S.compute_score(_grp("ANSWER"), oracle_mode="combined", dump_path=None)
+    assert all(_approx(x["oracle_match"], 0.5) for x in res_ans), [x["oracle_match"] for x in res_ans]
+
+    res_ret = S.compute_score(_grp("RETRIEVE"), oracle_mode="combined", dump_path=None)
+    assert all(_approx(x["oracle_match"], 0.5) for x in res_ret), [x["oracle_match"] for x in res_ret]
+
+    # Sanity: when they AGREE the blend is 0 or 1. Make verbal also ANSWER (c1=0.9, ec=0.5 -> 0.9>=0.25).
+    def _grp_agree(action):
+        g = []
+        for cA1, cA2 in zip(cA1_list, cA2_list):
+            a1 = gold if cA1 else "Berlin"
+            a2 = gold if cA2 else "Berlin"
+            rl = [_T1(ans=a1, conf="0.9"), _T2(action=action, ec="0.5"), _T3(ans=a2)]
+            aseq = [["CONTINUE", None], [action, None], ["ANSWER", a2]]
+            g.append(_ri_tid(rl, [gold], r, aseq, "qca"))
+        return g
+    # oracle_mc=ANSWER, oracle_verbal: 0.9 >= 0.5*0.5=0.25 -> ANSWER. emit ANSWER -> both match -> 1.0
+    res_agree = S.compute_score(_grp_agree("ANSWER"), oracle_mode="combined")
+    assert all(_approx(x["oracle_match"], 1.0) for x in res_agree), [x["oracle_match"] for x in res_agree]
+    # emit RETRIEVE -> both mismatch -> 0.0
+    res_agree_r = S.compute_score(_grp_agree("RETRIEVE"), oracle_mode="combined")
+    assert all(_approx(x["oracle_match"], 0.0) for x in res_agree_r)
+    print("PASS test_combined_oracle_blend (0.5 blend on disagreement; 0/1 on agreement)")
+
+
+def test_combined_oracle_diag_dump():
+    """combined dump carries BOTH oracle_mc and oracle_verbal."""
+    import tempfile, json, os as _os
+    gold = "Paris"; r = 0.5
+    cA1_list = [1, 1, 0, 0]; cA2_list = [1, 1, 1, 1]
+    g = []
+    for cA1, cA2 in zip(cA1_list, cA2_list):
+        a1 = gold if cA1 else "Berlin"
+        a2 = gold if cA2 else "Berlin"
+        rl = [_T1(ans=a1, conf="0.3"), _T2(action="ANSWER", ec="0.9"), _T3(ans=a2)]
+        aseq = [["CONTINUE", None], ["ANSWER", None], ["ANSWER", a2]]
+        g.append(_ri_tid(rl, [gold], r, aseq, "qcd"))
+    fd, path = tempfile.mkstemp(suffix=".jsonl"); _os.close(fd)
+    try:
+        S.compute_score(g, oracle_mode="combined", dump_path=path)
+        recs = [json.loads(l) for l in open(path) if l.strip()]
+        assert len(recs) == 4
+        for rec in recs:
+            assert rec["oracle_mc"] == "ANSWER", rec["oracle_mc"]      # p_A1=0.5 >= 0.5
+            assert rec["oracle_verbal"] == "RETRIEVE", rec["oracle_verbal"]  # 0.3 < 0.45
+            assert rec["oracle_mode"] == "combined"
+            assert rec["group_size"] == 4
+    finally:
+        _os.remove(path)
+    print("PASS test_combined_oracle_diag_dump")
+
+
+def test_new_modes_do_not_change_rollout_group():
+    """Regression: adding verbal/combined must not alter rollout or group results."""
+    # rollout: cA1=0,cA2=1,r=0.5 -> oracle RETRIEVE; emit RETRIEVE -> 1
+    rl = [_T1(ans="Berlin", conf="0.4"), _T2(action="RETRIEVE", ec="0.8"), _T3(ans="Paris")]
+    ri = _ri_tid(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]], "qz")
+    assert S.compute_score([ri], oracle_mode="rollout")[0]["oracle_match"] == 1.0
+    assert _score(ri)["oracle_match"] == 1.0  # default == rollout
+    # group on a real group (the canonical wave-2 case) still flips by r — unchanged.
+    cA1_list = [1, 1, 0, 0]; cA2_list = [1, 1, 1, 1]
+    grp = _build_group("Paris", 0.65, "qzg", cA1_list, cA2_list, action="RETRIEVE")
+    assert all(x["oracle_match"] == 1.0 for x in S.compute_score(grp, oracle_mode="group"))
+    print("PASS test_new_modes_do_not_change_rollout_group")
+
+
 def _load_rollout_parser():
     """Extract `parse_turn_action_turn` from the rollout module WITHOUT importing vllm/torch.
 
@@ -345,6 +492,39 @@ def test_turn_aware_parser():
     print("PASS test_turn_aware_parser")
 
 
+# ------------------------------------------------- ec-BEFORE-action (ecfirst variant) parsing
+def _T2_ecfirst(action="RETRIEVE", ec="0.8", analysis="decide"):
+    """T2 with <estimated_confidence> emitted BEFORE <action> (the ecfirst variant)."""
+    return (f"<think>x</think><analysis>{analysis}</analysis>"
+            f"<estimated_confidence>{ec}</estimated_confidence><action>{action}</action>")
+
+
+def test_ecfirst_rollout_parser_order_independent():
+    """The rollout's <action> regex searches the whole body, so ec-before-action parses fine.
+    Eval (force_retrieve=False) must still follow the emitted action; train forces RETRIEVE."""
+    R = _load_rollout_parser()
+    t2_ans = _T2_ecfirst(action="ANSWER", ec="0.8")
+    t2_ret = _T2_ecfirst(action="RETRIEVE", ec="0.3")
+    # eval: follow emitted action regardless of ec position
+    assert R.parse_turn_action_turn(t2_ans, 1, force_retrieve=False)[0] == "ANSWER"
+    assert R.parse_turn_action_turn(t2_ret, 1, force_retrieve=False)[0] == "RETRIEVE"
+    # train: always RETRIEVE, record emitted action token
+    out = R.parse_turn_action_turn(t2_ans, 1, force_retrieve=True)
+    assert out[0] == "RETRIEVE" and "ANSWER" in [str(x).upper() for x in out], out
+    print("PASS test_ecfirst_rollout_parser_order_independent")
+
+
+def test_ecfirst_reward_parse_and_verbal():
+    """Reward-side: ec-before-action T2 still parses action+ec; verbal oracle then works.
+    c1=0.5, ec=0.8, r=0.5 -> ANSWER oracle; emit ANSWER -> match 1; format gate passes."""
+    rl = [_T1(ans="Paris", conf="0.5"), _T2_ecfirst(action="ANSWER", ec="0.8"), _T3(ans="Paris")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["ANSWER", None], ["ANSWER", "Paris"]])
+    d = S.compute_score([ri], oracle_mode="verbal")[0]
+    assert d["format_reward"] == 1.0, d          # ec & action both parsed despite order
+    assert d["oracle_match"] == 1.0, d           # verbal oracle ANSWER, emitted ANSWER
+    print("PASS test_ecfirst_reward_parse_and_verbal")
+
+
 if __name__ == "__main__":
     test_oracle_cases()
     test_brier_values()
@@ -356,5 +536,13 @@ if __name__ == "__main__":
     test_group_oracle_diag_dump()
     test_group_size_one_fallback()
     test_rollout_mode_unchanged()
+    test_verbal_oracle_r_sensitivity()
+    test_verbal_oracle_missing_conf()
+    test_verbal_oracle_diag_dump()
+    test_combined_oracle_blend()
+    test_combined_oracle_diag_dump()
+    test_new_modes_do_not_change_rollout_group()
     test_turn_aware_parser()
+    test_ecfirst_rollout_parser_order_independent()
+    test_ecfirst_reward_parse_and_verbal()
     print("\nALL TESTS PASSED")

@@ -175,9 +175,20 @@ def compute_score(reward_inputs, format_weight=0.1,
         Each rollout's oracle_match = 1[emitted_action == oracle_group]. cA1/cA2 are
         action-independent (A1 from T1, A2 from forced T3) -> clean, non-circular estimates. Groups
         of size 1 fall back to per-rollout-like behavior (p == that rollout's binary correctness).
+      "verbal" (verbalized-confidence oracle; ec-before-action variant): per-rollout oracle derived
+        from the model's OWN continuous verbalized confidences: oracle = ANSWER iff c1 >= ec*r else
+        RETRIEVE. Because c1,ec in [0,1] this threshold moves with r (r-sensitive, unlike the binary
+        rollout oracle). oracle_match = 1[emitted_action == oracle]. If c1 or ec is None (format
+        fail) -> oracle is None -> oracle_match = 0 (and the format gate zeroes overall anyway).
+        Pairs with the popqa_3turn_ecfirst[_cost].jinja templates that emit ec BEFORE the action.
+      "combined" (MC + verbal blend): compute BOTH the group-MC oracle (as in "group") and the
+        verbal oracle, then oracle_match = 0.5*1[action==oracle_mc] + 0.5*1[action==oracle_verbal].
+        Requires the group pass (reuses the group code).
+    Brier (c1/ec/c2) and all other terms are identical across modes.
     """
-    if oracle_mode not in ("rollout", "group"):
-        raise ValueError(f"oracle_mode must be 'rollout' or 'group', got {oracle_mode!r}")
+    if oracle_mode not in ("rollout", "group", "verbal", "combined"):
+        raise ValueError(
+            f"oracle_mode must be 'rollout', 'group', 'verbal' or 'combined', got {oracle_mode!r}")
 
     # ---- Pass 1: per-rollout parse + realized correctness (action-independent). ----
     rows = []
@@ -212,9 +223,9 @@ def compute_score(reward_inputs, format_weight=0.1,
             "task_id": str(ri.get("task_id", ri.get("index", ""))),
         })
 
-    # ---- Group-mean (MC) probabilities per task_id (only used when oracle_mode == "group"). ----
+    # ---- Group-mean (MC) probabilities per task_id (used by "group" and "combined"). ----
     group_p = {}
-    if oracle_mode == "group":
+    if oracle_mode in ("group", "combined"):
         by_tid = {}
         for row in rows:
             by_tid.setdefault(row["task_id"], []).append(row)
@@ -237,15 +248,37 @@ def compute_score(reward_inputs, format_weight=0.1,
         cA1 = row["cA1"]; cA2 = row["cA2"]
         y = cA2  # post-retrieval label
 
-        if oracle_mode == "group":
+        # Verbal oracle (continuous c1/ec). r-sensitive. None if c1 or ec missing (format fail).
+        oracle_verbal = None
+        if c1 is not None and ec is not None:
+            oracle_verbal = "ANSWER" if c1 >= ec * r else "RETRIEVE"
+
+        oracle_mc = None  # group-MC oracle (set for group/combined)
+        if oracle_mode in ("group", "combined"):
             gp = group_p[row["task_id"]]
             p_A1, p_A2 = gp["p_A1"], gp["p_A2"]
-            oracle = gp["oracle_group"]
+            oracle_mc = gp["oracle_group"]
+
+        if oracle_mode == "group":
+            oracle = oracle_mc
+            act_reward = 1.0 if (action is not None and action == oracle) else 0.0
+        elif oracle_mode == "verbal":
+            # per-rollout binary correctness still reported as p_A1/p_A2 for the diag.
+            p_A1, p_A2 = float(cA1), float(cA2)
+            oracle = oracle_verbal
+            act_reward = 1.0 if (action is not None and oracle is not None and action == oracle) else 0.0
+        elif oracle_mode == "combined":
+            # 0.5/0.5 blend of MC and verbal matches. A None verbal oracle contributes 0 to its half.
+            mc_match = 1.0 if (action is not None and action == oracle_mc) else 0.0
+            vb_match = 1.0 if (action is not None and oracle_verbal is not None
+                              and action == oracle_verbal) else 0.0
+            act_reward = 0.5 * mc_match + 0.5 * vb_match
+            oracle = oracle_mc  # report the MC oracle as the headline "oracle" diag
         else:
-            # per-rollout oracle (cost-optimal given both realized outcomes). tie -> ANSWER.
+            # rollout (legacy): per-rollout oracle (cost-optimal given both realized outcomes). tie -> ANSWER.
             p_A1, p_A2 = float(cA1), float(cA2)
             oracle = "ANSWER" if cA1 >= cA2 * r else "RETRIEVE"
-        act_reward = 1.0 if (action is not None and action == oracle) else 0.0
+            act_reward = 1.0 if (action is not None and action == oracle) else 0.0
 
         # Calibration (Brier 1 - error^2) over present terms. ec & c2 share label y.
         cal_terms = []
@@ -296,10 +329,14 @@ def compute_score(reward_inputs, format_weight=0.1,
         diags.append({
             "c1": c1, "ec": ec, "c2": c2,
             "action": action, "oracle": oracle,
+            "oracle_verbal": oracle_verbal,
+            "oracle_mc": oracle_mc,
             "oracle_mode": oracle_mode,
             "p_A1": round(p_A1, 6), "p_A2": round(p_A2, 6),
-            "oracle_group": (group_p[row["task_id"]]["oracle_group"] if oracle_mode == "group" else None),
-            "group_size": (group_p[row["task_id"]]["group_size"] if oracle_mode == "group" else 1),
+            "oracle_group": (group_p[row["task_id"]]["oracle_group"]
+                             if oracle_mode in ("group", "combined") else None),
+            "group_size": (group_p[row["task_id"]]["group_size"]
+                           if oracle_mode in ("group", "combined") else 1),
             "cA1": cA1, "cA2": cA2, "y": y, "r": r,
             "brier_c1": (None if c1 is None else round((c1 - cA1) ** 2, 6)),
             "brier_ec": (None if ec is None else round((ec - y) ** 2, 6)),
