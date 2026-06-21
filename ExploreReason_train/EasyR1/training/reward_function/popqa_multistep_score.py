@@ -115,7 +115,11 @@ def count_retrieves(action_seqs):
 
 def compute_score(reward_inputs, format_weight=0.1, schema=1,
                   w_task=0.7, w_cal=0.3, w_mse=0.15, info_gain_weight=0.0,
-                  log_dir=None, max_turns=2, dump_path=None, **kw):
+                  ec_reward="mse", log_dir=None, max_turns=2, dump_path=None, **kw):
+    # ec_reward="brier": calibration-dominant multi-turn RLCR — ec gets a Brier reward vs the
+    #   post-retrieval correctness (correct_final), joining c1/c2 in the calibration term (no MSE).
+    #   Use with calibration-dominant weights (e.g. w_task=0.4, w_cal=0.6) and info_gain_weight=0.
+    # ec_reward="mse" (default): legacy — ec trained by MSE(ec,c2) as a separate w_mse term.
     # info_gain_weight>0 (belief-RL inspired, arXiv 2602.12342): additive shaping that credits a
     # RETRIEVE only when it improves correctness (correct_final - correct_A1 in {-1,0,+1}); 0 by
     # default so schema1/schema2 baselines are unaffected.
@@ -148,16 +152,18 @@ def compute_score(reward_inputs, format_weight=0.1, schema=1,
         task = correct_final * (r ** num_retrieves)
         cal_terms = []
         if c1 is not None:
-            cal_terms.append(1.0 - (c1 - correct_A1) ** 2)
+            cal_terms.append(1.0 - (c1 - correct_A1) ** 2)                 # Brier(c1) vs direct correctness
         if retrieved and c2 is not None:
-            cal_terms.append(1.0 - (c2 - correct_final) ** 2)
+            cal_terms.append(1.0 - (c2 - correct_final) ** 2)              # Brier(c2) vs post-retrieval correctness
+        if ec_reward == "brier" and retrieved and ec is not None:
+            cal_terms.append(1.0 - (ec - correct_final) ** 2)              # Brier(ec) vs post-retrieval correctness
         cal = sum(cal_terms) / len(cal_terms) if cal_terms else 0.0
 
         mse_r = None
-        if schema == 2 and retrieved and (ec is not None) and (c2 is not None):
+        if ec_reward == "mse" and schema == 2 and retrieved and (ec is not None) and (c2 is not None):
             mse_r = 1.0 - (ec - c2) ** 2
 
-        if schema == 2 and mse_r is not None:
+        if mse_r is not None:
             core = (w_task * task + w_cal * cal + w_mse * mse_r) / (w_task + w_cal + w_mse)
         else:
             core = (w_task * task + w_cal * cal) / (w_task + w_cal)
@@ -186,6 +192,7 @@ def compute_score(reward_inputs, format_weight=0.1, schema=1,
             "c1": c1, "c2": c2, "ec": ec, "correct_A1": correct_A1,
             "brier_c1": (None if c1 is None else round((c1 - correct_A1) ** 2, 6)),
             "brier_c2": (None if c2 is None else round((c2 - correct_final) ** 2, 6)),
+            "brier_ec": (None if (ec is None or not retrieved) else round((ec - correct_final) ** 2, 6)),
             "mse_ec": (None if (ec is None or c2 is None) else round((ec - c2) ** 2, 6)),
         })
 

@@ -290,6 +290,9 @@ class MultiTurnRolloutPopQA(BaseRollout):
         self.code_executor = None  # no code executor for PopQA
         self.enable_thinking = getattr(config, "enable_thinking", False)
         self.log_dir = getattr(config, "log_dir", None)
+        # v2 3-turn forced-retrieve paradigm (baseline 2-turn path used when three_turn=False).
+        self.three_turn = bool(getattr(config, "three_turn", False))
+        self.force_retrieve = bool(getattr(config, "force_retrieve", False))
 
         # vLLM inference engine
         self.inference_engine = LLM(
@@ -544,7 +547,24 @@ class MultiTurnRolloutPopQA(BaseRollout):
                 sorted_outputs = outputs
 
             responses = [x.outputs[0].text for x in sorted_outputs]
-            action_sequences = [parse_turn_action(responses[i]) for i in range(len(responses))]
+            if self.three_turn:
+                # v2 3-turn turn-aware parsing. turn_number == each active sample's turn index
+                # (T1 always CONTINUEs and T2 always RETRIEVEs under force_retrieve, so active
+                # samples stay synchronized; in eval, ANSWER-at-T2 samples stop and drop out).
+                _parsed = [parse_turn_action_turn(responses[i], turn_number, self.force_retrieve)
+                           for i in range(len(responses))]
+                # action_sequences feeds the loop's control flow (outcome, payload). For the reward
+                # we record the EMITTED T2 action so the oracle term sees the model's real choice.
+                action_sequences = []
+                for outcome, payload in _parsed:
+                    if outcome == 'CONTINUE':
+                        action_sequences.append(('CONTINUE', payload))      # T1: payload=A1
+                    elif outcome in ('RETRIEVE', 'ANSWER') and turn_number == 1:
+                        action_sequences.append((payload, outcome))         # T2: payload=emitted action
+                    else:
+                        action_sequences.append((outcome, payload))         # T3/TRUNCATED/None
+            else:
+                action_sequences = [parse_turn_action(responses[i]) for i in range(len(responses))]
 
             for i, index in enumerate(input_indices):
                 samples_info[index]['response'] += responses[i]
@@ -552,6 +572,57 @@ class MultiTurnRolloutPopQA(BaseRollout):
                 samples_info[index]['response_list'].append(responses[i])
                 samples_info[index]['finish_reason'] = sorted_outputs[i].outputs[0].finish_reason
                 samples_info[index]['action_seq'].append(action_sequences[i])
+
+                if self.three_turn:
+                    outcome, payload = _parsed[i]
+                    if outcome == 'CONTINUE':
+                        # T1: no context, do not stop, open a fresh assistant turn (decision turn).
+                        samples_info[index]['stop'] = False
+                        samples_info[index]['unit_test_trace'].append('CONTINUE')
+                        _nudge = "Now decide your action for TURN 2."
+                        samples_info[index]['sequence'] = samples_info[index]['sequence'].strip() + '\n'
+                        if self.enable_thinking:
+                            samples_info[index]['sequence'] += (f"<|im_start|>user\n{_nudge}\n<|im_end|>\n" f"<|im_start|>assistant\n")
+                        else:
+                            samples_info[index]['sequence'] += (f"<|im_start|>user\n{_nudge}\n<|im_end|>\n" f"<|im_start|>assistant\n<think>\n\n</think>\n\n")
+                        continue
+                    elif outcome == 'RETRIEVE':
+                        # T2 RETRIEVE (forced in train, or chosen in eval): inject context, run T3.
+                        samples_info[index]['stop'] = False
+                        samples_info[index]['unit_test_trace'].append('RETRIEVE')
+                        _ctx = samples_info[index]['csv_info'].get('retrieved_context', 'No relevant context found.')
+                        _fb = "Retrieved context:\n" + str(_ctx)
+                        samples_info[index]['sequence'] = samples_info[index]['sequence'].strip() + '\n'
+                        if self.enable_thinking:
+                            samples_info[index]['sequence'] += (f"<|im_start|>user\n{_fb.strip()}\n<|im_end|>\n" f"<|im_start|>assistant\n")
+                        else:
+                            samples_info[index]['sequence'] += (f"<|im_start|>user\n{_fb.strip()}\n<|im_end|>\n" f"<|im_start|>assistant\n<think>\n\n</think>\n\n")
+                        continue
+                    elif outcome == 'ANSWER':
+                        # Eval T2 ANSWER -> final = A1 (the T1 answer); OR T3 answer -> final = A2.
+                        samples_info[index]['stop'] = True
+                        # payload at T2 is the emitted action string; recover A1 from the recorded T1 turn.
+                        if turn_number >= 2:
+                            samples_info[index]['pred_answer'] = payload
+                        else:
+                            _a1 = None
+                            for _o, _p in samples_info[index]['action_seq']:
+                                if _o == 'CONTINUE':
+                                    _a1 = _p; break
+                            samples_info[index]['pred_answer'] = _a1 if _a1 is not None else ""
+                        samples_info[index]['correctness'] = calculate_correctness(
+                            samples_info[index]['pred_answer'], samples_info[index]['csv_info'])
+                        continue
+                    elif outcome == 'TRUNCATED':
+                        samples_info[index]['stop'] = True
+                        samples_info[index]['finish_reason'] = 'truncated_thinking'
+                        print(f"⚠️ Sample {index}: 3turn truncated thinking at turn {turn_number}. Stopping.")
+                        continue
+                    else:
+                        samples_info[index]['stop'] = True
+                        samples_info[index]['finish_reason'] = 'invalid_format'
+                        print(f"⚠️ Sample {index}: 3turn unrecognized format at turn {turn_number}. Stopping.")
+                        continue
 
                 action_type, content = action_sequences[i]
 
@@ -641,6 +712,16 @@ class MultiTurnRolloutPopQA(BaseRollout):
                     samples_info[index]['stop'] = True
                     samples_info[index]['finish_reason'] = sorted_outputs[i].outputs[0].finish_reason
                 break
+
+            if self.three_turn:
+                # 3-turn mode sets `stop` explicitly per-sample above (T1/T2 CONTINUE, T2 ANSWER/T3
+                # stop). Do NOT use _is_finished here: it relies on the legacy parser which would
+                # misread T1's <answer> (no <action>) as a stop. Just bump turn_count.
+                for i, index in enumerate(input_indices):
+                    samples_info[index]['turn_count'] = turn_number + 1
+                if all(samples_info[index]['stop'] for index in input_indices):
+                    break
+                continue
 
             is_finished = [
                 self._is_finished(responses[i])
@@ -942,6 +1023,57 @@ def parse_turn_action(text):
     if _re_popqa.match(r"^\s*RETRIEVE\b", stripped, flags=_re_popqa.IGNORECASE):
         return "RETRIEVE", None
     return None, None
+
+
+# ===== v2 3-turn forced-retrieve turn-aware parser (baseline 2-turn paths untouched) =====
+def parse_turn_action_turn(text, turn_idx, force_retrieve=False):
+    """Turn-INDEX-aware action parsing for the v2 3-turn schema.
+
+    Returns (outcome, payload):
+      Turn 0 (T1): expect <answer>A1, NO action  -> ("CONTINUE", A1)   (do NOT stop, do NOT inject ctx)
+      Turn 1 (T2): parse <action>.
+                   force_retrieve=True  (train) -> ("RETRIEVE", emitted_action)  (always run T3;
+                                                    emitted_action is the literally emitted token,
+                                                    recorded for the reward's oracle term)
+                   force_retrieve=False (eval)  -> follow the action:
+                                                    RETRIEVE -> ("RETRIEVE", "RETRIEVE")  (inject+continue)
+                                                    ANSWER   -> ("ANSWER", "ANSWER")      (stop, final=A1)
+      Turn 2 (T3): expect <answer>A2 -> ("ANSWER", A2)  (stop, final=A2)
+    Truncated thinking (<think> without </think>) -> ("TRUNCATED", None) at any turn.
+    Anything unrecognized -> (None, None) (invalid format; stop with format_reward=0).
+    """
+    if "<think>" in text and "</think>" not in text:
+        return "TRUNCATED", None
+    body = _re_popqa.sub(r"(?is)<think>.*?</think>", " ", text).replace("<|im_end|>", "")
+    ans_m = _re_popqa.search(r"(?is)<answer>(.*?)</answer>", body)
+    ans = ans_m.group(1).strip() if ans_m else None
+    act_m = _re_popqa.search(r"(?is)<action>\s*(RETRIEVE|ANSWER)\s*</action>", body)
+
+    if turn_idx == 0:
+        # T1: must carry an answer; never stops here.
+        if ans is not None:
+            return "CONTINUE", ans
+        return None, None
+
+    if turn_idx == 1:
+        # T2: decision turn.
+        emitted = act_m.group(1).upper() if act_m else None
+        if emitted is None:
+            return None, None  # missing <action> -> invalid format
+        if force_retrieve:
+            # Always run T3, but record the emitted action for the reward (oracle term).
+            return "RETRIEVE", emitted
+        # Eval: follow the emitted action.
+        if emitted == "RETRIEVE":
+            return "RETRIEVE", "RETRIEVE"
+        return "ANSWER", "ANSWER"
+
+    # turn_idx >= 2 (T3): post-retrieval forced answer.
+    if ans is not None:
+        return "ANSWER", ans
+    return None, None
+
+
 def calculate_correctness(pred, csv_info):
     answers = csv_info.get("possible_answers", []) if isinstance(csv_info, dict) else []
     if pred is None:

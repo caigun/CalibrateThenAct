@@ -43,6 +43,9 @@ class RolloutConfig:
     max_turns: int = 8
     num_llm_calls_available: int = 8
     single_turn_response_length: int = 500
+    # v2 3-turn forced-retrieve paradigm (PopQA). Defaults keep the 2-turn baseline path intact.
+    three_turn: bool = False        # enable the turn-aware T1->T2->T3 rollout schema
+    force_retrieve: bool = False    # train: always run T3 (record emitted action); eval: follow action
     crop_size: int = 200
     # Tool-use cropping behavior
     multi_point_enclosing_crop: bool = False

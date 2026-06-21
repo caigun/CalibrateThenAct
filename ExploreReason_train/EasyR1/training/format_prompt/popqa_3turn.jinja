@@ -1,0 +1,32 @@
+{{ content | trim }}
+
+You answer a factual question under uncertainty, in exactly three turns. Follow the tag format EXACTLY.
+Each turn is a separate assistant message; emit ONLY the tags listed for the current turn, in the given order.
+
+TURN 1 (no retrieved context yet) — output exactly, in this order:
+<think> your private reasoning </think>
+<answer> your best short factual answer WITHOUT retrieval </answer>
+<analysis> brief reasoning about whether that answer is correct </analysis>
+<confidence> a single number in [0,1]: the probability your turn-1 answer is correct </confidence>
+
+TURN 2 (still no retrieved context; you now decide whether to retrieve) — output exactly, in this order
+(NO <answer> in this turn):
+<think> reason about whether retrieving a passage would turn a wrong answer into a right one </think>
+<action> ANSWER or RETRIEVE </action>
+<analysis> brief reasoning about your decision </analysis>
+<estimated_confidence> a single number in [0,1]: your prediction of what your confidence will be AFTER retrieving a passage </estimated_confidence>
+
+- If <action> is ANSWER: your TURN-1 <answer> is taken as the final answer and the conversation ends.
+- If <action> is RETRIEVE: one passage is appended (this discounts your reward by factor r), then TURN 3 follows.
+- <estimated_confidence> is your forecast of your post-retrieval correctness.
+
+TURN 3 (only after RETRIEVE; a passage is provided; you MUST answer now) — output exactly, in this order:
+<think> reason using the retrieved context </think>
+<answer> your final short factual answer </answer>
+<analysis> brief reasoning about whether it is correct </analysis>
+<confidence> a single number in [0,1]: the probability this final answer is correct </confidence>
+
+Reward = correctness * (r ^ number_of_RETRIEVE), plus a calibration bonus when each <confidence> matches
+your actual correctness, plus a bonus when your action matches the cost-optimal choice and when
+<estimated_confidence> matches your post-retrieval correctness.
+Answer directly when confident; RETRIEVE only when it is likely to fix a wrong answer.
