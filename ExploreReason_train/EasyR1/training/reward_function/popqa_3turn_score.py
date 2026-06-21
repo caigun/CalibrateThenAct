@@ -164,9 +164,23 @@ def count_retrieves(action_seqs):
 
 def compute_score(reward_inputs, format_weight=0.1,
                   w_a1=1.0, w_act=1.0, w_a2=1.0, w_cal=1.0,
-                  max_turns=3, dump_path=None, **kw):
-    results = []
-    diags = []
+                  max_turns=3, dump_path=None, oracle_mode="rollout", **kw):
+    """oracle_mode:
+      "rollout" (default, UNCHANGED): per-rollout oracle = ANSWER iff cA1 >= cA2*r, with binary
+        cA1,cA2 -> r-DEGENERATE (see RESULTS_v2_3turn.md WAVE-1). Kept for backward compatibility.
+      "group" (cost-aware MC oracle): estimate p_A1=mean(cA1), p_A2=mean(cA2) over the GRPO rollout
+        GROUP (same task_id, same r — all n rollouts of a prompt are present in this single
+        compute_score call; verified against BatchFunctionRewardManager). Then a SINGLE group-level
+        oracle_group = ANSWER iff p_A1 >= p_A2*r is genuinely r-sensitive because p_A1,p_A2 in [0,1].
+        Each rollout's oracle_match = 1[emitted_action == oracle_group]. cA1/cA2 are
+        action-independent (A1 from T1, A2 from forced T3) -> clean, non-circular estimates. Groups
+        of size 1 fall back to per-rollout-like behavior (p == that rollout's binary correctness).
+    """
+    if oracle_mode not in ("rollout", "group"):
+        raise ValueError(f"oracle_mode must be 'rollout' or 'group', got {oracle_mode!r}")
+
+    # ---- Pass 1: per-rollout parse + realized correctness (action-independent). ----
+    rows = []
     for ri in reward_inputs:
         answers = ri.get("possible_answers", ri.get("gold_answers", []))
         r = float(ri.get("discount_factor", 1.0))
@@ -190,10 +204,47 @@ def compute_score(reward_inputs, format_weight=0.1,
 
         cA1 = popqa_correct(A1, answers)
         cA2 = popqa_correct(A2, answers) if A2 is not None else 0.0
+        rows.append({
+            "ri": ri, "r": r, "rl": rl, "action": action,
+            "t1": t1, "t2": t2, "t3": t3,
+            "A1": A1, "A2": A2, "c1": c1, "ec": ec, "c2": c2,
+            "cA1": cA1, "cA2": cA2,
+            "task_id": str(ri.get("task_id", ri.get("index", ""))),
+        })
+
+    # ---- Group-mean (MC) probabilities per task_id (only used when oracle_mode == "group"). ----
+    group_p = {}
+    if oracle_mode == "group":
+        by_tid = {}
+        for row in rows:
+            by_tid.setdefault(row["task_id"], []).append(row)
+        for tid, grp in by_tid.items():
+            n = len(grp)
+            p_A1 = sum(g["cA1"] for g in grp) / n
+            p_A2 = sum(g["cA2"] for g in grp) / n
+            r_g = grp[0]["r"]  # r is identical within a task_id group
+            oracle_group = "ANSWER" if p_A1 >= p_A2 * r_g else "RETRIEVE"
+            group_p[tid] = {"p_A1": p_A1, "p_A2": p_A2, "oracle_group": oracle_group,
+                            "group_size": n}
+
+    # ---- Pass 2: oracle, calibration, core, overall. ----
+    results = []
+    diags = []
+    for row in rows:
+        ri = row["ri"]; r = row["r"]; rl = row["rl"]; action = row["action"]
+        t1 = row["t1"]; t2 = row["t2"]; t3 = row["t3"]
+        A1 = row["A1"]; A2 = row["A2"]; c1 = row["c1"]; ec = row["ec"]; c2 = row["c2"]
+        cA1 = row["cA1"]; cA2 = row["cA2"]
         y = cA2  # post-retrieval label
 
-        # Oracle action (cost-optimal given both realized outcomes). tie -> ANSWER.
-        oracle = "ANSWER" if cA1 >= cA2 * r else "RETRIEVE"
+        if oracle_mode == "group":
+            gp = group_p[row["task_id"]]
+            p_A1, p_A2 = gp["p_A1"], gp["p_A2"]
+            oracle = gp["oracle_group"]
+        else:
+            # per-rollout oracle (cost-optimal given both realized outcomes). tie -> ANSWER.
+            p_A1, p_A2 = float(cA1), float(cA2)
+            oracle = "ANSWER" if cA1 >= cA2 * r else "RETRIEVE"
         act_reward = 1.0 if (action is not None and action == oracle) else 0.0
 
         # Calibration (Brier 1 - error^2) over present terms. ec & c2 share label y.
@@ -245,6 +296,10 @@ def compute_score(reward_inputs, format_weight=0.1,
         diags.append({
             "c1": c1, "ec": ec, "c2": c2,
             "action": action, "oracle": oracle,
+            "oracle_mode": oracle_mode,
+            "p_A1": round(p_A1, 6), "p_A2": round(p_A2, 6),
+            "oracle_group": (group_p[row["task_id"]]["oracle_group"] if oracle_mode == "group" else None),
+            "group_size": (group_p[row["task_id"]]["group_size"] if oracle_mode == "group" else 1),
             "cA1": cA1, "cA2": cA2, "y": y, "r": r,
             "brier_c1": (None if c1 is None else round((c1 - cA1) ** 2, 6)),
             "brier_ec": (None if ec is None else round((ec - y) ** 2, 6)),

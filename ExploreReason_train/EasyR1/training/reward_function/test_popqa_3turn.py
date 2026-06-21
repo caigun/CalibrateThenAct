@@ -31,6 +31,12 @@ def _score(ri, **kw):
     return S.compute_score([ri], **kw)[0]
 
 
+def _ri_tid(response_list, answers, r, action_seqs, task_id):
+    d = _ri(response_list, answers, r, action_seqs)
+    d["task_id"] = task_id
+    return d
+
+
 def _approx(a, b, tol=1e-6):
     return abs(a - b) <= tol
 
@@ -165,6 +171,117 @@ def test_eval_action_following():
     print("PASS test_eval_action_following")
 
 
+# ---------------------------------------------------------------- group-mean (MC) oracle: r-sensitivity
+def _build_group(gold, r, task_id, cA1_list, cA2_list, action="RETRIEVE"):
+    """Build a GRPO group of rollouts sharing task_id & r. Each rollout's A1/A2 are made correct or
+    wrong per cA1_list[i]/cA2_list[i]. The emitted T2 action is `action` for every rollout."""
+    group = []
+    for cA1, cA2 in zip(cA1_list, cA2_list):
+        a1 = gold if cA1 else "Berlin"
+        a2 = gold if cA2 else "Berlin"
+        rl = [_T1(ans=a1), _T2(action=action), _T3(ans=a2)]
+        aseq = [["CONTINUE", None], [action, None], ["ANSWER", a2]]
+        group.append(_ri_tid(rl, [gold], r, aseq, task_id))
+    return group
+
+
+def test_group_oracle_r_sensitivity():
+    """Group with p_A1=0.5, p_A2=1.0. Oracle flips with r (this is the WAVE-2 fix headline):
+       r=0.4 -> 0.5 >= 0.4*1.0 = 0.4  -> ANSWER
+       r=0.65-> 0.5 <  0.65*1.0 = 0.65 -> RETRIEVE
+    The per-rollout binary oracle CANNOT do this (it is r-degenerate)."""
+    # 4 rollouts: cA1 = [1,1,0,0] -> p_A1=0.5 ; cA2 = [1,1,1,1] -> p_A2=1.0
+    cA1_list = [1, 1, 0, 0]
+    cA2_list = [1, 1, 1, 1]
+
+    # --- r = 0.4 -> oracle_group ANSWER ---
+    grp_lo = _build_group("Paris", 0.4, "q1", cA1_list, cA2_list, action="RETRIEVE")
+    res_lo = S.compute_score(grp_lo, oracle_mode="group", dump_path=None)
+    # every rollout sees the SAME group oracle = ANSWER; emitted action RETRIEVE -> oracle_match 0
+    # re-derive expected group oracle for assertion clarity (p_A1/p_A2 are in the dump diag).
+    p_A1 = sum(cA1_list) / len(cA1_list)   # 0.5
+    p_A2 = sum(cA2_list) / len(cA2_list)   # 1.0
+    oracle_lo = "ANSWER" if p_A1 >= p_A2 * 0.4 else "RETRIEVE"
+    assert oracle_lo == "ANSWER", oracle_lo
+    assert all(r["oracle_match"] == 0.0 for r in res_lo)  # emitted RETRIEVE != ANSWER
+
+    # If rollouts had emitted ANSWER instead, they would MATCH at r=0.4
+    grp_lo_ans = _build_group("Paris", 0.4, "q1", cA1_list, cA2_list, action="ANSWER")
+    res_lo_ans = S.compute_score(grp_lo_ans, oracle_mode="group", dump_path=None)
+    assert all(r["oracle_match"] == 1.0 for r in res_lo_ans)
+
+    # --- r = 0.65 -> oracle_group RETRIEVE (THE FLIP) ---
+    grp_hi = _build_group("Paris", 0.65, "q1", cA1_list, cA2_list, action="RETRIEVE")
+    res_hi = S.compute_score(grp_hi, oracle_mode="group", dump_path=None)
+    oracle_hi = "ANSWER" if p_A1 >= p_A2 * 0.65 else "RETRIEVE"
+    assert oracle_hi == "RETRIEVE", oracle_hi
+    assert all(r["oracle_match"] == 1.0 for r in res_hi)  # emitted RETRIEVE == RETRIEVE
+
+    # Same group emitting ANSWER at r=0.65 -> mismatch
+    grp_hi_ans = _build_group("Paris", 0.65, "q1", cA1_list, cA2_list, action="ANSWER")
+    res_hi_ans = S.compute_score(grp_hi_ans, oracle_mode="group", dump_path=None)
+    assert all(r["oracle_match"] == 0.0 for r in res_hi_ans)
+    print("PASS test_group_oracle_r_sensitivity (oracle FLIPS ANSWER@r=0.4 -> RETRIEVE@r=0.65)")
+
+
+def test_group_oracle_diag_dump():
+    """The dump must carry p_A1, p_A2, oracle_group, group_size diagnostics."""
+    import tempfile, json, os as _os
+    cA1_list = [1, 1, 0, 0]; cA2_list = [1, 1, 1, 1]
+    grp = _build_group("Paris", 0.65, "qd", cA1_list, cA2_list, action="RETRIEVE")
+    fd, path = tempfile.mkstemp(suffix=".jsonl"); _os.close(fd)
+    try:
+        S.compute_score(grp, oracle_mode="group", dump_path=path)
+        recs = [json.loads(l) for l in open(path) if l.strip()]
+        assert len(recs) == 4
+        for rec in recs:
+            assert _approx(rec["p_A1"], 0.5), rec["p_A1"]
+            assert _approx(rec["p_A2"], 1.0), rec["p_A2"]
+            assert rec["oracle_group"] == "RETRIEVE", rec["oracle_group"]
+            assert rec["group_size"] == 4, rec["group_size"]
+            assert rec["oracle_mode"] == "group"
+    finally:
+        _os.remove(path)
+    print("PASS test_group_oracle_diag_dump")
+
+
+def test_group_size_one_fallback():
+    """A group of size 1 -> p == that rollout's binary correctness (per-rollout-like)."""
+    # single rollout: cA1=0, cA2=1, r=0.5. p_A1=0, p_A2=1 -> 0 >= 0.5 False -> RETRIEVE
+    grp = _build_group("Paris", 0.5, "qs", [0], [1], action="RETRIEVE")
+    res = S.compute_score(grp, oracle_mode="group", dump_path=None)
+    assert res[0]["oracle_match"] == 1.0  # oracle RETRIEVE, emitted RETRIEVE
+    # rollout-mode on the same single sample gives the identical oracle here
+    res_roll = S.compute_score(grp, oracle_mode="rollout", dump_path=None)
+    assert res_roll[0]["oracle_match"] == 1.0
+    print("PASS test_group_size_one_fallback")
+
+
+def test_rollout_mode_unchanged():
+    """oracle_mode default ('rollout') must reproduce the legacy per-rollout behavior exactly,
+    independent of any other samples in the batch (no cross-sample leakage)."""
+    # legacy case: cA1=0, cA2=1, r=0.5 -> oracle RETRIEVE; emit RETRIEVE -> match 1
+    rl = [_T1(ans="Berlin"), _T2(action="RETRIEVE"), _T3(ans="Paris")]
+    ri = _ri_tid(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]], "qx")
+    # default (no kwarg) and explicit "rollout" both equal
+    assert _score(ri)["oracle_match"] == 1.0
+    assert S.compute_score([ri], oracle_mode="rollout")[0]["oracle_match"] == 1.0
+
+    # Batch this WITH other samples of the same task_id: rollout-mode must IGNORE the group.
+    # Add a sibling with cA1=1,cA2=1 (which in group-mode would change p_A1) — rollout-mode unaffected.
+    sib = _ri_tid([_T1(ans="Paris"), _T2(action="RETRIEVE"), _T3(ans="Paris")], ["Paris"], 0.5,
+                  [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]], "qx")
+    batch = [ri, sib]
+    res_roll = S.compute_score(batch, oracle_mode="rollout")
+    # sample0: cA1=0,cA2=1 -> oracle RETRIEVE -> match 1 ; sample1: cA1=1,cA2=1,r=0.5 -> ANSWER -> emit RETRIEVE -> 0
+    assert res_roll[0]["oracle_match"] == 1.0
+    assert res_roll[1]["oracle_match"] == 0.0
+    # group-mode: p_A1=0.5,p_A2=1.0,r=0.5 -> 0.5>=0.5 -> ANSWER for BOTH -> both emit RETRIEVE -> 0
+    res_grp = S.compute_score(batch, oracle_mode="group")
+    assert res_grp[0]["oracle_match"] == 0.0 and res_grp[1]["oracle_match"] == 0.0
+    print("PASS test_rollout_mode_unchanged (no cross-sample leakage; group differs from rollout)")
+
+
 def _load_rollout_parser():
     """Extract `parse_turn_action_turn` from the rollout module WITHOUT importing vllm/torch.
 
@@ -235,5 +352,9 @@ if __name__ == "__main__":
     test_format_gate()
     test_end_to_end_overall()
     test_eval_action_following()
+    test_group_oracle_r_sensitivity()
+    test_group_oracle_diag_dump()
+    test_group_size_one_fallback()
+    test_rollout_mode_unchanged()
     test_turn_aware_parser()
     print("\nALL TESTS PASSED")
