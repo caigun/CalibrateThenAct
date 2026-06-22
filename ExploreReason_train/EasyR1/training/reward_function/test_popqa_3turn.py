@@ -719,12 +719,121 @@ def test_w_ec_absent_ec_unaffected():
     print("PASS test_w_ec_absent_ec_unaffected (ec absent -> w_ec has no effect on cal)")
 
 
+# ---------------------------------------------------------------- ec_target: distill p_A2 into ec Brier
+def test_ec_target_default_cA2_identical():
+    """REGRESSION: ec_target default ("cA2") must be byte-identical to the legacy behavior on a
+    worked example, AND identical to an explicit ec_target="cA2" call. Reuses the
+    test_end_to_end_overall example (c1=0.9,ec=0.8,c2=0.95, cA1=cA2=1, r=0.5):
+      cal = (0.99 + 0.96 + 0.9975)/3 = 0.9825 ; core=(1+0+1+0.9825)/4 ; overall=0.1+0.9*core.
+    Also: even WITH a p_A2 column present, ec_target=cA2 must IGNORE it (use cA2)."""
+    rl = [_T1(ans="Paris", conf="0.9"), _T2(action="RETRIEVE", ec="0.8"), _T3(ans="Paris", conf="0.95")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+    cal = (0.99 + 0.96 + 0.9975) / 3.0
+    core = (1.0 + 0.0 + 1.0 + cal) / 4.0
+    overall = 0.1 + 0.9 * core
+
+    d_default = _score(ri)                       # default (no ec_target) == legacy
+    d_explicit = _score(ri, ec_target="cA2")     # explicit cA2
+    assert _approx(d_default["cal_reward"], round(cal, 6)), d_default["cal_reward"]
+    assert _approx(d_default["overall"], round(overall, 6)), d_default["overall"]
+    assert d_default["cal_reward"] == d_explicit["cal_reward"], (d_default, d_explicit)
+    assert d_default["overall"] == d_explicit["overall"], (d_default, d_explicit)
+
+    # p_A2 column present but ec_target=cA2 -> still uses cA2 (column ignored).
+    ri_col = dict(ri); ri_col["p_A2"] = 0.2
+    d_col = _score(ri_col, ec_target="cA2")
+    assert d_col["cal_reward"] == d_default["cal_reward"], (d_col, d_default)
+    print("PASS test_ec_target_default_cA2_identical (default==legacy; column ignored at cA2)")
+
+
+def test_ec_target_p_a2_uses_precomputed_label():
+    """ec_target="p_a2": ec Brier term scored vs the precomputed p_A2 column (continuous label),
+    NOT this rollout's cA2. With p_A2=0.7, ec=0.6:
+      ec Brier term = 1-(0.6-0.7)^2 = 1-0.01 = 0.99  (hand-check)
+    Same example otherwise: c1=0.9/cA1=1 -> 0.99 ; c2=0.95/y(=cA2=1) -> 0.9975 (UNCHANGED targets).
+      cal_p_a2 = (0.99 + 0.99 + 0.9975)/3
+    The cA2-target value uses ec vs cA2=1 -> 1-(0.6-1)^2 = 0.84, so the two MUST differ."""
+    rl = [_T1(ans="Paris", conf="0.9"), _T2(action="RETRIEVE", ec="0.6"), _T3(ans="Paris", conf="0.95")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+    ri_p = dict(ri); ri_p["p_A2"] = 0.7
+
+    b_ec_p = 1.0 - (0.6 - 0.7) ** 2   # 0.99
+    assert _approx(b_ec_p, 0.99), b_ec_p
+    cal_p = (0.99 + b_ec_p + 0.9975) / 3.0
+    d_p = _score(ri_p, ec_target="p_a2")
+    assert _approx(d_p["cal_reward"], round(cal_p, 6)), (d_p["cal_reward"], cal_p)
+
+    # cA2-target value differs (ec vs cA2=1 -> 0.84).
+    b_ec_cA2 = 1.0 - (0.6 - 1.0) ** 2   # 0.84
+    cal_cA2 = (0.99 + b_ec_cA2 + 0.9975) / 3.0
+    d_cA2 = _score(ri_p, ec_target="cA2")
+    assert _approx(d_cA2["cal_reward"], round(cal_cA2, 6)), (d_cA2["cal_reward"], cal_cA2)
+    assert d_p["cal_reward"] != d_cA2["cal_reward"], (d_p["cal_reward"], d_cA2["cal_reward"])
+
+    # c1 and c2 Brier terms unchanged: verify via dump diag (brier_c1, brier_c2) equal across targets.
+    import tempfile, json, os as _os
+    def _diag(ri_in, tgt):
+        fd, path = tempfile.mkstemp(suffix=".jsonl"); _os.close(fd)
+        try:
+            S.compute_score([ri_in], ec_target=tgt, dump_path=path)
+            return [json.loads(l) for l in open(path) if l.strip()][0]
+        finally:
+            _os.remove(path)
+    dg_p = _diag(ri_p, "p_a2"); dg_c = _diag(ri_p, "cA2")
+    assert dg_p["brier_c1"] == dg_c["brier_c1"], (dg_p["brier_c1"], dg_c["brier_c1"])
+    assert dg_p["brier_c2"] == dg_c["brier_c2"], (dg_p["brier_c2"], dg_c["brier_c2"])
+    assert _approx(dg_p["ec_y"], 0.7), dg_p["ec_y"]          # ec target became p_A2
+    assert _approx(dg_p["brier_ec"], 0.01), dg_p["brier_ec"] # (0.6-0.7)^2
+    assert dg_p["ec_target"] == "p_a2"
+    print("PASS test_ec_target_p_a2_uses_precomputed_label (ec vs p_A2=0.7; c1/c2 unchanged)")
+
+
+def test_ec_target_p_a2_missing_falls_back_to_cA2():
+    """ec_target="p_a2" with NO p_A2 column (or negative sentinel) -> falls back to cA2 target,
+    so the result equals the cA2-target result (eval splits without precomp columns still work)."""
+    rl = [_T1(ans="Paris", conf="0.9"), _T2(action="RETRIEVE", ec="0.6"), _T3(ans="Paris", conf="0.95")]
+    # no p_A2 column at all
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+    d_p = _score(ri, ec_target="p_a2")
+    d_c = _score(ri, ec_target="cA2")
+    assert d_p["cal_reward"] == d_c["cal_reward"], (d_p, d_c)
+    # negative sentinel -> also fallback
+    ri_neg = dict(ri); ri_neg["p_A2"] = -1.0
+    d_neg = _score(ri_neg, ec_target="p_a2")
+    assert d_neg["cal_reward"] == d_c["cal_reward"], (d_neg, d_c)
+    print("PASS test_ec_target_p_a2_missing_falls_back_to_cA2")
+
+
+def test_ec_target_independent_of_oracle_mode():
+    """ec_target works under any oracle_mode (e.g. verbal) and only touches the ec term.
+    Under oracle_mode=verbal with p_A2=0.7, ec=0.6: ec Brier vs 0.7 (0.99), c1 unchanged."""
+    rl = [_T1(ans="Paris", conf="0.9"), _T2(action="ANSWER", ec="0.6"), _T3(ans="Paris", conf="0.95")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["ANSWER", None], ["ANSWER", "Paris"]])
+    ri["p_A2"] = 0.7
+    import tempfile, json, os as _os
+    fd, path = tempfile.mkstemp(suffix=".jsonl"); _os.close(fd)
+    try:
+        S.compute_score([ri], oracle_mode="verbal", ec_target="p_a2", dump_path=path)
+        rec = [json.loads(l) for l in open(path) if l.strip()][0]
+        assert rec["oracle_mode"] == "verbal"
+        assert _approx(rec["ec_y"], 0.7), rec["ec_y"]
+        assert _approx(rec["brier_ec"], 0.01), rec["brier_ec"]
+        assert rec["ec_target"] == "p_a2"
+    finally:
+        _os.remove(path)
+    print("PASS test_ec_target_independent_of_oracle_mode")
+
+
 if __name__ == "__main__":
     test_oracle_cases()
     test_brier_values()
     test_w_ec_default_is_identical()
     test_w_ec_upweights_ec_term()
     test_w_ec_absent_ec_unaffected()
+    test_ec_target_default_cA2_identical()
+    test_ec_target_p_a2_uses_precomputed_label()
+    test_ec_target_p_a2_missing_falls_back_to_cA2()
+    test_ec_target_independent_of_oracle_mode()
     test_action_oracle_reward()
     test_format_gate()
     test_end_to_end_overall()

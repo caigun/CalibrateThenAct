@@ -164,7 +164,8 @@ def count_retrieves(action_seqs):
 
 def compute_score(reward_inputs, format_weight=0.1,
                   w_a1=1.0, w_act=1.0, w_a2=1.0, w_cal=1.0, w_ec=1.0,
-                  max_turns=3, dump_path=None, oracle_mode="rollout", **kw):
+                  max_turns=3, dump_path=None, oracle_mode="rollout",
+                  ec_target="cA2", **kw):
     """oracle_mode:
       "rollout" (default, UNCHANGED): per-rollout oracle = ANSWER iff cA1 >= cA2*r, with binary
         cA1,cA2 -> r-DEGENERATE (see RESULTS_v2_3turn.md WAVE-1). Kept for backward compatibility.
@@ -192,11 +193,20 @@ def compute_score(reward_inputs, format_weight=0.1,
         p_A1/p_A2 used are the STATIC dataset columns, NOT this batch's realized cA1/cA2. If a column
         is missing it falls back to the rollout's own binary correctness (and a None-action -> 0).
     Brier (c1/ec/c2) and all other terms are identical across modes.
+
+    ec_target (additive, oracle_mode-independent; default "cA2" = UNCHANGED behavior):
+      "cA2"  -> ec Brier term scored vs this rollout's binary post-retrieval correctness y=cA2.
+      "p_a2" -> ec Brier term scored vs the PRECOMPUTED per-question continuous label read from
+        the reward_input column p_A2 (the same baked column the precomp oracle reads): term
+        becomes 1-(ec - p_A2)^2 (distillation). Falls back to cA2 when p_A2 is missing/sentinel
+        (<0). Only the ec term's target changes; c1 and c2 targets are untouched.
     """
     if oracle_mode not in ("rollout", "group", "verbal", "combined", "precomp"):
         raise ValueError(
             "oracle_mode must be 'rollout', 'group', 'verbal', 'combined' or 'precomp', "
             f"got {oracle_mode!r}")
+    if ec_target not in ("cA2", "p_a2"):
+        raise ValueError(f"ec_target must be 'cA2' or 'p_a2', got {ec_target!r}")
 
     # ---- Pass 1: per-rollout parse + realized correctness (action-independent). ----
     rows = []
@@ -255,6 +265,21 @@ def compute_score(reward_inputs, format_weight=0.1,
         A1 = row["A1"]; A2 = row["A2"]; c1 = row["c1"]; ec = row["ec"]; c2 = row["c2"]
         cA1 = row["cA1"]; cA2 = row["cA2"]
         y = cA2  # post-retrieval label
+        # ec Brier target. Default "cA2" -> y (this rollout's binary post-retrieval correctness,
+        # UNCHANGED behavior). "p_a2" -> the PRECOMPUTED per-question continuous label from the
+        # reward_input column p_A2 (distillation target; same column the precomp oracle reads),
+        # falling back to cA2 when the column is missing/sentinel (<0) so eval splits without
+        # precomp columns still work. Independent of oracle_mode. c1/c2 targets are untouched.
+        ec_y = y
+        if ec_target == "p_a2":
+            _pv = ri.get("p_A2", None)
+            if _pv is not None:
+                try:
+                    _pvf = float(_pv)
+                except (TypeError, ValueError):
+                    _pvf = -1.0
+                if _pvf >= 0.0:
+                    ec_y = min(max(_pvf, 0.0), 1.0)
 
         # Verbal oracle (continuous c1/ec). r-sensitive. None if c1 or ec missing (format fail).
         oracle_verbal = None
@@ -319,7 +344,7 @@ def compute_score(reward_inputs, format_weight=0.1,
             cal_num += 1.0 * (1.0 - (c1 - cA1) ** 2)
             cal_den += 1.0
         if ec is not None:
-            cal_num += w_ec * (1.0 - (ec - y) ** 2)
+            cal_num += w_ec * (1.0 - (ec - ec_y) ** 2)
             cal_den += w_ec
         if (c2 is not None) and (t3 is not None):
             cal_num += 1.0 * (1.0 - (c2 - y) ** 2)
@@ -375,7 +400,8 @@ def compute_score(reward_inputs, format_weight=0.1,
                            if oracle_mode in ("group", "combined") else 1),
             "cA1": cA1, "cA2": cA2, "y": y, "r": r,
             "brier_c1": (None if c1 is None else round((c1 - cA1) ** 2, 6)),
-            "brier_ec": (None if ec is None else round((ec - y) ** 2, 6)),
+            "brier_ec": (None if ec is None else round((ec - ec_y) ** 2, 6)),
+            "ec_target": ec_target, "ec_y": round(ec_y, 6),
             "brier_c2": (None if (c2 is None or t3 is None) else round((c2 - y) ** 2, 6)),
             "core": round(core, 6),
         })
