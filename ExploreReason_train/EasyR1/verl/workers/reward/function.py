@@ -199,6 +199,12 @@ class BatchFunctionRewardManager(FunctionRewardManager):
             # reward scored against only the first gold alias).
             if "discount_factor" in data.non_tensor_batch:
                 reward_input["discount_factor"] = data.non_tensor_batch["discount_factor"][i]
+            # Forward precomputed-MC oracle probabilities (baked dataset columns; used by
+            # popqa_3turn_score oracle_mode="precomp"). Additive: absent for legacy datasets.
+            if "p_A1" in data.non_tensor_batch:
+                reward_input["p_A1"] = data.non_tensor_batch["p_A1"][i]
+            if "p_A2" in data.non_tensor_batch:
+                reward_input["p_A2"] = data.non_tensor_batch["p_A2"][i]
             if "possible_answers" in data.non_tensor_batch:
                 reward_input["possible_answers"] = data.non_tensor_batch["possible_answers"][i]
             if "helper_call_traces" in data.non_tensor_batch:

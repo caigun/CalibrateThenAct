@@ -415,6 +415,120 @@ def test_combined_oracle_diag_dump():
     print("PASS test_combined_oracle_diag_dump")
 
 
+# ---------------------------------------------------------------- precomp oracle: r-sensitivity
+def _ri_precomp(response_list, answers, r, action_seqs, p_A1, p_A2, task_id="qp"):
+    d = _ri_tid(response_list, answers, r, action_seqs, task_id)
+    d["p_A1"] = p_A1
+    d["p_A2"] = p_A2
+    return d
+
+
+def test_precomp_oracle_r_sensitivity():
+    """Precomp oracle = ANSWER iff p_A1 >= p_A2*r, from BAKED columns (NOT realized cA1/cA2).
+    p_A1=0.4, p_A2=0.8 -> ANSWER iff 0.4 >= 0.8*r iff r <= 0.5.
+      r=0.4 -> 0.4 >= 0.32 -> ANSWER
+      r=0.6 -> 0.4 <  0.48 -> RETRIEVE
+    Note: realized A1/A2 in the rollout are made WRONG/RIGHT to prove the columns (not cA1/cA2) drive it."""
+    # Realized: A1 wrong, A2 right (cA1=0, cA2=1) -> the binary 'rollout' oracle would be RETRIEVE
+    # regardless of r; precomp must instead use p_A1=0.4, p_A2=0.8 and flip with r.
+    rl = [_T1(ans="Berlin"), _T2(action="ANSWER", ec="0.5"), _T3(ans="Paris")]
+
+    # r=0.4 -> oracle ANSWER ; emit ANSWER -> match 1
+    ri_lo = _ri_precomp(rl, ["Paris"], 0.4,
+                        [["CONTINUE", None], ["ANSWER", None], ["ANSWER", "Paris"]], 0.4, 0.8)
+    d_lo = S.compute_score([ri_lo], oracle_mode="precomp", dump_path=None)[0]
+    assert d_lo["oracle_match"] == 1.0, ("r=0.4 should -> ANSWER oracle (p_A1>=p_A2*r)", d_lo)
+
+    # r=0.6 -> oracle RETRIEVE ; emit ANSWER -> mismatch 0
+    ri_hi = _ri_precomp(rl, ["Paris"], 0.6,
+                        [["CONTINUE", None], ["ANSWER", None], ["ANSWER", "Paris"]], 0.4, 0.8)
+    d_hi = S.compute_score([ri_hi], oracle_mode="precomp", dump_path=None)[0]
+    assert d_hi["oracle_match"] == 0.0, ("r=0.6 should -> RETRIEVE oracle, emitted ANSWER", d_hi)
+
+    # Symmetric: emit RETRIEVE -> mismatch at r=0.4, match at r=0.6
+    rl_ret = [_T1(ans="Berlin"), _T2(action="RETRIEVE", ec="0.5"), _T3(ans="Paris")]
+    ri_lo_r = _ri_precomp(rl_ret, ["Paris"], 0.4,
+                          [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]], 0.4, 0.8)
+    assert S.compute_score([ri_lo_r], oracle_mode="precomp")[0]["oracle_match"] == 0.0
+    ri_hi_r = _ri_precomp(rl_ret, ["Paris"], 0.6,
+                          [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]], 0.4, 0.8)
+    assert S.compute_score([ri_hi_r], oracle_mode="precomp")[0]["oracle_match"] == 1.0
+    print("PASS test_precomp_oracle_r_sensitivity (ANSWER@r=0.4 -> RETRIEVE@r=0.6 for p_A1=0.4,p_A2=0.8)")
+
+
+def test_precomp_oracle_uses_columns_not_realized():
+    """Precomp must use the baked p_A1/p_A2, IGNORING this rollout's realized cA1/cA2.
+    Construct a rollout that is fully CORRECT (cA1=1,cA2=1) but columns say p_A1=0.0,p_A2=1.0:
+      oracle = ANSWER iff 0.0 >= 1.0*r -> RETRIEVE for any r in (0,1]. emit RETRIEVE -> match."""
+    rl = [_T1(ans="Paris"), _T2(action="RETRIEVE", ec="0.5"), _T3(ans="Paris")]  # cA1=cA2=1
+    ri = _ri_precomp(rl, ["Paris"], 0.5,
+                     [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]], 0.0, 1.0)
+    d = S.compute_score([ri], oracle_mode="precomp")[0]
+    assert d["oracle_match"] == 1.0, ("columns p_A1=0 -> RETRIEVE oracle despite cA1=1", d)
+    # rollout-mode on the SAME sample: cA1=1>=cA2*0.5 -> ANSWER -> emit RETRIEVE -> mismatch 0 (proves divergence)
+    d_roll = S.compute_score([ri], oracle_mode="rollout")[0]
+    assert d_roll["oracle_match"] == 0.0
+    print("PASS test_precomp_oracle_uses_columns_not_realized")
+
+
+def test_precomp_oracle_missing_columns_fallback():
+    """If p_A1/p_A2 columns are absent, precomp falls back to the rollout's binary correctness."""
+    # cA1=0, cA2=1, r=0.5, NO columns -> falls back to 0 >= 1*0.5 -> RETRIEVE. emit RETRIEVE -> match.
+    rl = [_T1(ans="Berlin"), _T2(action="RETRIEVE", ec="0.5"), _T3(ans="Paris")]
+    ri = _ri_tid(rl, ["Paris"], 0.5,
+                 [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]], "qpf")
+    d = S.compute_score([ri], oracle_mode="precomp")[0]
+    assert d["oracle_match"] == 1.0, d
+    print("PASS test_precomp_oracle_missing_columns_fallback")
+
+
+def test_precomp_oracle_negative_sentinel_fallback():
+    """A negative sentinel (-1.0, baked into eval rows lacking a precomp estimate) is treated as
+    missing -> falls back to the rollout's binary correctness (not a degenerate p=0 oracle)."""
+    # cA1=0, cA2=1, r=0.5, columns=-1 -> fallback -> 0 >= 1*0.5 -> RETRIEVE. emit RETRIEVE -> 1.
+    rl = [_T1(ans="Berlin"), _T2(action="RETRIEVE", ec="0.5"), _T3(ans="Paris")]
+    ri = _ri_precomp(rl, ["Paris"], 0.5,
+                     [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]], -1.0, -1.0)
+    d = S.compute_score([ri], oracle_mode="precomp")[0]
+    assert d["oracle_match"] == 1.0, d
+    print("PASS test_precomp_oracle_negative_sentinel_fallback")
+
+
+def test_precomp_oracle_diag_dump():
+    """The dump carries p_A1, p_A2 (the BAKED values), oracle, oracle_mode for precomp."""
+    import tempfile, json, os as _os
+    rl = [_T1(ans="Berlin"), _T2(action="ANSWER", ec="0.5"), _T3(ans="Paris")]
+    ri = _ri_precomp(rl, ["Paris"], 0.6,
+                     [["CONTINUE", None], ["ANSWER", None], ["ANSWER", "Paris"]], 0.4, 0.8)
+    fd, path = tempfile.mkstemp(suffix=".jsonl"); _os.close(fd)
+    try:
+        S.compute_score([ri], oracle_mode="precomp", dump_path=path)
+        rec = [json.loads(l) for l in open(path) if l.strip()][0]
+        assert _approx(rec["p_A1"], 0.4), rec["p_A1"]
+        assert _approx(rec["p_A2"], 0.8), rec["p_A2"]
+        assert rec["oracle"] == "RETRIEVE", rec["oracle"]   # 0.4 < 0.8*0.6=0.48
+        assert rec["oracle_mode"] == "precomp"
+        assert rec["oracle_mc"] is None  # not a group mode
+    finally:
+        _os.remove(path)
+    print("PASS test_precomp_oracle_diag_dump")
+
+
+def test_precomp_does_not_change_legacy_modes():
+    """Regression: presence of p_A1/p_A2 columns must NOT alter rollout/group/verbal/combined.
+    They only read p_A1/p_A2 in precomp mode."""
+    rl = [_T1(ans="Berlin", conf="0.4"), _T2(action="RETRIEVE", ec="0.8"), _T3(ans="Paris")]
+    # add bogus columns that WOULD flip a precomp oracle but must be ignored by other modes
+    ri = _ri_precomp(rl, ["Paris"], 0.5,
+                     [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]], 1.0, 0.0, "qpr")
+    # rollout: cA1=0,cA2=1,r=0.5 -> RETRIEVE -> emit RETRIEVE -> 1 (unchanged by columns)
+    assert S.compute_score([ri], oracle_mode="rollout")[0]["oracle_match"] == 1.0
+    assert _score(ri)["oracle_match"] == 1.0  # default==rollout, columns ignored
+    # verbal: c1=0.4,ec=0.8,r=0.5 -> ANSWER iff 0.4>=0.4 -> ANSWER; emit RETRIEVE -> 0 (unchanged)
+    assert S.compute_score([ri], oracle_mode="verbal")[0]["oracle_match"] == 0.0
+    print("PASS test_precomp_does_not_change_legacy_modes")
+
+
 def test_new_modes_do_not_change_rollout_group():
     """Regression: adding verbal/combined must not alter rollout or group results."""
     # rollout: cA1=0,cA2=1,r=0.5 -> oracle RETRIEVE; emit RETRIEVE -> 1
@@ -541,6 +655,12 @@ if __name__ == "__main__":
     test_verbal_oracle_diag_dump()
     test_combined_oracle_blend()
     test_combined_oracle_diag_dump()
+    test_precomp_oracle_r_sensitivity()
+    test_precomp_oracle_uses_columns_not_realized()
+    test_precomp_oracle_missing_columns_fallback()
+    test_precomp_oracle_negative_sentinel_fallback()
+    test_precomp_oracle_diag_dump()
+    test_precomp_does_not_change_legacy_modes()
     test_new_modes_do_not_change_rollout_group()
     test_turn_aware_parser()
     test_ecfirst_rollout_parser_order_independent()

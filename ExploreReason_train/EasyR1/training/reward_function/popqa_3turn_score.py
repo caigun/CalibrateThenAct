@@ -184,11 +184,19 @@ def compute_score(reward_inputs, format_weight=0.1,
       "combined" (MC + verbal blend): compute BOTH the group-MC oracle (as in "group") and the
         verbal oracle, then oracle_match = 0.5*1[action==oracle_mc] + 0.5*1[action==oracle_verbal].
         Requires the group pass (reuses the group code).
+      "precomp" (PRECOMPUTED-MC oracle): read OFFLINE-estimated per-question probabilities p_A1,
+        p_A2 directly from the reward_input (baked dataset columns; see scripts/precompute_mc_oracle.py
+        and data/rl_3turn_p1_precomp). oracle = ANSWER iff p_A1 >= p_A2*r else RETRIEVE; this is
+        genuinely r-sensitive AND sharp (MC=10, 11 levels) — unlike "group" (coarse at n=4 live
+        rollouts) and the r-degenerate "rollout". oracle_match = 1[emitted_action == oracle]. The
+        p_A1/p_A2 used are the STATIC dataset columns, NOT this batch's realized cA1/cA2. If a column
+        is missing it falls back to the rollout's own binary correctness (and a None-action -> 0).
     Brier (c1/ec/c2) and all other terms are identical across modes.
     """
-    if oracle_mode not in ("rollout", "group", "verbal", "combined"):
+    if oracle_mode not in ("rollout", "group", "verbal", "combined", "precomp"):
         raise ValueError(
-            f"oracle_mode must be 'rollout', 'group', 'verbal' or 'combined', got {oracle_mode!r}")
+            "oracle_mode must be 'rollout', 'group', 'verbal', 'combined' or 'precomp', "
+            f"got {oracle_mode!r}")
 
     # ---- Pass 1: per-rollout parse + realized correctness (action-independent). ----
     rows = []
@@ -274,6 +282,26 @@ def compute_score(reward_inputs, format_weight=0.1,
                               and action == oracle_verbal) else 0.0
             act_reward = 0.5 * mc_match + 0.5 * vb_match
             oracle = oracle_mc  # report the MC oracle as the headline "oracle" diag
+        elif oracle_mode == "precomp":
+            # PRECOMPUTED static per-question MC probabilities (baked dataset columns).
+            # Fall back to this rollout's binary correctness if a column is absent / sentinel.
+            # A negative value (e.g. -1.0 baked into eval rows with no precomp estimate) is
+            # treated as "missing" -> fallback, so eval splits never get a degenerate p=0 oracle.
+            def _pf(key, default):
+                v = ri.get(key, None)
+                if v is None:
+                    return float(default)
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    return float(default)
+                if fv < 0.0:
+                    return float(default)
+                return min(max(fv, 0.0), 1.0)
+            p_A1 = _pf("p_A1", cA1)
+            p_A2 = _pf("p_A2", cA2)
+            oracle = "ANSWER" if p_A1 >= p_A2 * r else "RETRIEVE"
+            act_reward = 1.0 if (action is not None and action == oracle) else 0.0
         else:
             # rollout (legacy): per-rollout oracle (cost-optimal given both realized outcomes). tie -> ANSWER.
             p_A1, p_A2 = float(cA1), float(cA2)
