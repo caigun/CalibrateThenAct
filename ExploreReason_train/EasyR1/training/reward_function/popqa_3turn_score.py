@@ -164,6 +164,7 @@ def count_retrieves(action_seqs):
 
 def compute_score(reward_inputs, format_weight=0.1,
                   w_a1=1.0, w_act=1.0, w_a2=1.0, w_cal=1.0, w_ec=1.0,
+                  w_c1cal=1.0, w_c2cal=1.0,
                   max_turns=3, dump_path=None, oracle_mode="rollout",
                   ec_target="cA2", **kw):
     """oracle_mode:
@@ -334,21 +335,25 @@ def compute_score(reward_inputs, format_weight=0.1,
             act_reward = 1.0 if (action is not None and action == oracle) else 0.0
 
         # Calibration (Brier 1 - error^2) over present terms. ec & c2 share label y.
-        # WEIGHTED mean: c1 and c2 Brier terms carry weight 1.0; the ec term carries
-        # weight w_ec (RELATIVE up-weight, default 1.0). At w_ec=1.0 this reduces EXACTLY
-        # to the plain mean of present terms (identical to the pre-w_ec behavior). When ec
-        # is absent (no retrieval / format fail) its term + weight are simply not included.
+        # WEIGHTED mean: each present Brier term carries a per-confidence weight --
+        # c1 term -> w_c1cal, ec term -> w_ec, c2 term -> w_c2cal (all default 1.0).
+        # At (w_c1cal, w_ec, w_c2cal) == (1.0, 1.0, 1.0) this reduces EXACTLY to the plain
+        # mean of present terms (byte-identical to the prior behavior). Setting w_c1cal=0
+        # and w_c2cal=0 (with w_ec=1) yields cal == the ec Brier term only (Brier on ec
+        # ONLY -- no calibration pressure on c1/c2). When a confidence is absent (no
+        # retrieval / format fail) its term AND its weight simply drop out. Guard
+        # div-by-zero: cal=0 if no terms are present OR all present weights are 0.
         cal_num = 0.0
         cal_den = 0.0
         if c1 is not None:
-            cal_num += 1.0 * (1.0 - (c1 - cA1) ** 2)
-            cal_den += 1.0
+            cal_num += w_c1cal * (1.0 - (c1 - cA1) ** 2)
+            cal_den += w_c1cal
         if ec is not None:
             cal_num += w_ec * (1.0 - (ec - ec_y) ** 2)
             cal_den += w_ec
         if (c2 is not None) and (t3 is not None):
-            cal_num += 1.0 * (1.0 - (c2 - y) ** 2)
-            cal_den += 1.0
+            cal_num += w_c2cal * (1.0 - (c2 - y) ** 2)
+            cal_den += w_c2cal
         cal = cal_num / cal_den if cal_den > 0.0 else 0.0
 
         core = (w_a1 * cA1 + w_act * act_reward + w_a2 * cA2 + w_cal * cal) / (w_a1 + w_act + w_a2 + w_cal)

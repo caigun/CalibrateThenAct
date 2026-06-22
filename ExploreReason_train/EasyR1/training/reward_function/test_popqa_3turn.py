@@ -824,12 +824,77 @@ def test_ec_target_independent_of_oracle_mode():
     print("PASS test_ec_target_independent_of_oracle_mode")
 
 
+
+# ---------------------------------------------------------------- per-confidence cal weights
+def test_cal_weights_default_is_identical():
+    """REGRESSION: at (w_c1cal, w_ec, w_c2cal) == (1,1,1) -- the defaults -- cal_reward and
+    overall must be BYTE-IDENTICAL to the legacy (no-kwarg) call AND to the hand value.
+
+    Reuse the worked example (c1=0.9,ec=0.8,c2=0.95, cA1=cA2=1, r=0.5):
+      cal_plain = (0.99 + 0.96 + 0.9975)/3 = 0.9825
+      core      = (1 + 0 + 1 + 0.9825)/4 ; overall = 0.1 + 0.9*core
+    """
+    rl = [_T1(ans="Paris", conf="0.9"), _T2(action="RETRIEVE", ec="0.8"), _T3(ans="Paris", conf="0.95")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+
+    cal_plain = (0.99 + 0.96 + 0.9975) / 3.0
+    core = (1.0 + 0.0 + 1.0 + cal_plain) / 4.0
+    overall = 0.1 + 0.9 * core
+
+    d_default = _score(ri)                                      # legacy (no kwargs)
+    d_explicit = _score(ri, w_c1cal=1.0, w_ec=1.0, w_c2cal=1.0)  # explicit defaults
+    # 1) explicit (1,1,1) matches the hand-computed PRE-CHANGE cal/overall
+    assert _approx(d_explicit["cal_reward"], round(cal_plain, 6)), (d_explicit["cal_reward"], cal_plain)
+    assert _approx(d_explicit["overall"], round(overall, 6)), (d_explicit["overall"], overall)
+    # 2) explicit (1,1,1) is byte-identical to the default call (exact equality)
+    assert d_explicit["cal_reward"] == d_default["cal_reward"], (d_explicit, d_default)
+    assert d_explicit["overall"] == d_default["overall"], (d_explicit, d_default)
+    print("PASS test_cal_weights_default_is_identical (w_c1cal=w_ec=w_c2cal=1 == legacy, exact)")
+
+
+def test_cal_weights_ec_only():
+    """ec-ONLY calibration: (w_c1cal=0, w_c2cal=0, w_ec=1) -> cal == the ec Brier term ALONE
+    (no calibration on c1 or c2). Hand-check:
+      ec=0.8, y=cA2=1 -> ec Brier term = 1-(0.8-1)^2 = 1-0.04 = 0.96
+    cal must equal 0.96 exactly (c1=0.9 and c2=0.95 terms carry weight 0 -> dropped from num & den).
+    Contrast: the default (1,1,1) cal is the 3-term mean 0.9825, so the two MUST differ.
+    """
+    rl = [_T1(ans="Paris", conf="0.9"), _T2(action="RETRIEVE", ec="0.8"), _T3(ans="Paris", conf="0.95")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+
+    brier_ec = 1.0 - (0.8 - 1.0) ** 2   # 0.96 (term scored vs cA2=1)
+    assert _approx(brier_ec, 0.96), brier_ec
+    d = _score(ri, w_c1cal=0.0, w_c2cal=0.0, w_ec=1.0)
+    # cal is EXACTLY the ec Brier term
+    assert _approx(d["cal_reward"], round(brier_ec, 6)), (d["cal_reward"], brier_ec)
+    # core/overall use ONLY the ec Brier as cal
+    core = (1.0 + 0.0 + 1.0 + brier_ec) / 4.0
+    overall = 0.1 + 0.9 * core
+    assert _approx(d["overall"], round(overall, 6)), (d["overall"], overall)
+    # and it differs from the default 3-term mean
+    d_default = _score(ri)
+    assert d["cal_reward"] != d_default["cal_reward"], (d["cal_reward"], d_default["cal_reward"])
+    print("PASS test_cal_weights_ec_only (w_c1cal=0,w_c2cal=0,w_ec=1 -> cal == brier_ec == 0.96)")
+
+
+def test_cal_weights_all_zero_guard():
+    """Div-by-zero guard: if every present term's weight is 0, cal == 0.0 (no NaN/crash)."""
+    rl = [_T1(ans="Paris", conf="0.9"), _T2(action="RETRIEVE", ec="0.8"), _T3(ans="Paris", conf="0.95")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+    d = _score(ri, w_c1cal=0.0, w_c2cal=0.0, w_ec=0.0)
+    assert d["cal_reward"] == 0.0, d["cal_reward"]
+    print("PASS test_cal_weights_all_zero_guard (all weights 0 -> cal=0.0)")
+
+
 if __name__ == "__main__":
     test_oracle_cases()
     test_brier_values()
     test_w_ec_default_is_identical()
     test_w_ec_upweights_ec_term()
     test_w_ec_absent_ec_unaffected()
+    test_cal_weights_default_is_identical()
+    test_cal_weights_ec_only()
+    test_cal_weights_all_zero_guard()
     test_ec_target_default_cA2_identical()
     test_ec_target_p_a2_uses_precomputed_label()
     test_ec_target_p_a2_missing_falls_back_to_cA2()
