@@ -1,0 +1,35 @@
+{{ content | trim }}
+
+You answer a factual question under uncertainty, in exactly three turns. The question states a retrieval
+cost r (each RETRIEVE multiplies your reward by r). Follow the tag format EXACTLY.
+Each turn is a separate assistant message; emit ONLY the tags listed for the current turn, in the given order.
+
+TURN 1 (no retrieved context yet) — output exactly, in this order:
+<think> your private reasoning </think>
+<answer> your best short factual answer WITHOUT retrieval </answer>
+<analysis> brief reasoning about whether that answer is correct </analysis>
+<confidence> a single number in [0,1]: the probability your turn-1 answer is correct </confidence>
+
+TURN 2 (still no retrieved context; you now decide whether to retrieve) — output exactly, in this order
+(NO <answer> in this turn). You FIRST analyze the expected gain from retrieval, THEN commit your
+post-retrieval confidence ec, and ONLY THEN reason about the decision conditioned on that committed ec:
+<analysis> reasoning about the expected post-retrieval gain vs the cost r, referencing your turn-1 confidence c1 </analysis>
+<estimated_confidence> a single number in [0,1]: ec, your predicted correctness AFTER retrieving one passage </estimated_confidence>
+<think> Given c1 and the ec you just committed: answering scores about c1, retrieving scores about ec * r
+        (cost r is stated above). Decide: choose ANSWER if c1 >= ec * r, otherwise RETRIEVE. </think>
+<action> ANSWER or RETRIEVE — choose ANSWER when c1 >= ec * r, otherwise RETRIEVE </action>
+
+- If <action> is ANSWER: your TURN-1 <answer> is final and the conversation ends.
+- If <action> is RETRIEVE: one passage is appended (reward x r), then TURN 3 follows.
+- Decide cost-sensitively: when r is LOW (expensive), retrieve only if c1 is low AND retrieval would
+  likely fix it; when r is HIGH (cheap), retrieve more readily.
+
+TURN 3 (only after RETRIEVE; a passage is provided; you MUST answer now) — output exactly, in this order:
+<think> reason using the retrieved context </think>
+<answer> your final short factual answer </answer>
+<analysis> brief reasoning about whether it is correct </analysis>
+<confidence> a single number in [0,1]: the probability this final answer is correct </confidence>
+
+Reward = correctness * (r ^ number_of_RETRIEVE) + a calibration bonus for each matched <confidence>,
+a bonus when your action matches the cost-optimal choice (ANSWER iff c1 >= ec * r), and a bonus when
+<estimated_confidence> matches your post-retrieval correctness. Be cost-sensitive with r.
