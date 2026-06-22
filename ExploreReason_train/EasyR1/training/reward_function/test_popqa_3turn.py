@@ -639,9 +639,92 @@ def test_ecfirst_reward_parse_and_verbal():
     print("PASS test_ecfirst_reward_parse_and_verbal")
 
 
+# ---------------------------------------------------------------- w_ec calibration up-weight
+def test_w_ec_default_is_identical():
+    """KEY SAFETY CHECK: at w_ec=1.0 the weighted cal mean reduces EXACTLY to the plain mean,
+    so cal_reward and overall are byte-identical to the pre-w_ec behavior for a worked example.
+
+    Reuse the test_end_to_end_overall worked example (c1=0.9,ec=0.8,c2=0.95, cA1=cA2=1, r=0.5):
+      cal_plain = (0.99 + 0.96 + 0.9975)/3 = 0.9825  (the pre-change value)
+      core      = (1 + 0 + 1 + 0.9825)/4
+      overall   = 0.1 + 0.9*core
+    Assert that the explicit w_ec=1.0 result equals BOTH the hand value AND the default (no-kwarg) call.
+    """
+    rl = [_T1(ans="Paris", conf="0.9"), _T2(action="RETRIEVE", ec="0.8"), _T3(ans="Paris", conf="0.95")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+
+    cal_plain = (0.99 + 0.96 + 0.9975) / 3.0          # pre-change plain mean
+    core = (1.0 + 0.0 + 1.0 + cal_plain) / 4.0
+    overall = 0.1 + 0.9 * core
+
+    d_default = _score(ri)                              # default (no w_ec) == legacy
+    d_w1 = _score(ri, w_ec=1.0)                         # explicit w_ec=1.0
+    # 1) explicit w_ec=1.0 matches the hand-computed PRE-CHANGE cal/overall
+    assert _approx(d_w1["cal_reward"], round(cal_plain, 6)), (d_w1["cal_reward"], cal_plain)
+    assert _approx(d_w1["overall"], round(overall, 6)), (d_w1["overall"], overall)
+    # 2) explicit w_ec=1.0 is byte-identical to the default call (no behavior change at default)
+    assert d_w1["cal_reward"] == d_default["cal_reward"], (d_w1, d_default)
+    assert d_w1["overall"] == d_default["overall"], (d_w1, d_default)
+    print("PASS test_w_ec_default_is_identical (w_ec=1.0 == legacy plain mean, regression-safe)")
+
+
+def test_w_ec_upweights_ec_term():
+    """At w_ec=3.0 the ec Brier term dominates the weighted cal mean. Hand-computed.
+
+    Same worked example: c1=0.9/cA1=1 -> 0.99 ; ec=0.8/y=1 -> 0.96 ; c2=0.95/y=1 -> 0.9975.
+    Weighted mean with weights (1.0, 3.0, 1.0):
+      cal = (1*0.99 + 3*0.96 + 1*0.9975) / (1 + 3 + 1)
+          = (0.99 + 2.88 + 0.9975) / 5.0
+          = 4.8675 / 5.0 = 0.9735
+    This is LOWER than the plain mean 0.9825 because the (worse-calibrated) ec term is up-weighted.
+      core    = (1 + 0 + 1 + 0.9735)/4
+      overall = 0.1 + 0.9*core
+    """
+    rl = [_T1(ans="Paris", conf="0.9"), _T2(action="RETRIEVE", ec="0.8"), _T3(ans="Paris", conf="0.95")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+
+    b_c1, b_ec, b_c2 = 0.99, 0.96, 0.9975
+    cal = (1.0 * b_c1 + 3.0 * b_ec + 1.0 * b_c2) / (1.0 + 3.0 + 1.0)
+    assert _approx(cal, 0.9735), cal
+    core = (1.0 + 0.0 + 1.0 + cal) / 4.0
+    overall = 0.1 + 0.9 * core
+
+    d = _score(ri, w_ec=3.0)
+    assert _approx(d["cal_reward"], round(cal, 6)), (d["cal_reward"], cal)
+    assert _approx(d["overall"], round(overall, 6)), (d["overall"], overall)
+    # the up-weighted ec term pulled cal BELOW the plain mean (0.9825) -> ec dominates as intended
+    cal_plain = (b_c1 + b_ec + b_c2) / 3.0
+    assert d["cal_reward"] < round(cal_plain, 6), (d["cal_reward"], cal_plain)
+    print("PASS test_w_ec_upweights_ec_term (w_ec=3.0 -> ec Brier dominates cal: 0.9735 < 0.9825)")
+
+
+def test_w_ec_absent_ec_unaffected():
+    """When ec is absent (eval ANSWER path, no T3 retrieval) w_ec must not affect cal at all:
+    only the c1 term is present, so cal == that term regardless of w_ec."""
+    # Eval ANSWER: T1 + T2(ANSWER), no T3 -> ec present in T2 though. Use a no-T2-ec case instead:
+    # build a 2-element rollout where T2 has ec, but to isolate "ec absent" we drop T2/T3 parsing of ec.
+    # Simplest: T1 only + T2 ANSWER (ec present) is NOT ec-absent. Construct genuine ec-absent via
+    # a single-turn-ish rollout where T2 is absent is a format fail; instead test that with ONLY c1
+    # contributing (no ec, no c2) cal is invariant. We force that by a T2 lacking ec is a format
+    # fail (overall 0) but cal still computed from present terms. Use rl with T1 + T2(no ec) + T3.
+    bad_t2 = "<think>x</think><analysis>c</analysis><action>RETRIEVE</action>"  # no estimated_confidence
+    rl = [_T1(ans="Paris", conf="0.9"), bad_t2, _T3(ans="Paris", conf="0.95")]
+    ri = _ri(rl, ["Paris"], 0.5, [["CONTINUE", None], ["RETRIEVE", None], ["ANSWER", "Paris"]])
+    # cal here uses c1 (0.99) and c2 (0.9975) only; ec absent -> w_ec irrelevant.
+    cal_expected = (0.99 + 0.9975) / 2.0
+    d1 = _score(ri, w_ec=1.0)
+    d3 = _score(ri, w_ec=3.0)
+    assert _approx(d1["cal_reward"], round(cal_expected, 6)), d1["cal_reward"]
+    assert d1["cal_reward"] == d3["cal_reward"], (d1["cal_reward"], d3["cal_reward"])
+    print("PASS test_w_ec_absent_ec_unaffected (ec absent -> w_ec has no effect on cal)")
+
+
 if __name__ == "__main__":
     test_oracle_cases()
     test_brier_values()
+    test_w_ec_default_is_identical()
+    test_w_ec_upweights_ec_term()
+    test_w_ec_absent_ec_unaffected()
     test_action_oracle_reward()
     test_format_gate()
     test_end_to_end_overall()
